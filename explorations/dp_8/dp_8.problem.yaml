@@ -1,0 +1,83 @@
+# -----------------------------------------------------------------------------
+# Author: Simone Machetti
+#
+# Description:
+#   Optimize the DP8 of unified-core's PE for area and power, starting from a behavioral
+#   implementation (imp_v1/). Claude Code writes each new implementation; eval.py checks
+#   it, measures it and saves it as the next imp_vN/.
+# -----------------------------------------------------------------------------
+
+id: dp_8
+
+statement: >-
+  Optimize the DP8 of unified-core's PE for area and power at nearly the same speed. The DP8
+  computes the dot product of eight signed int8 x signed int4 products, sum_k a_k * b_k, as one
+  signed 15-bit output y_o (the value lies in [-8128, +8192]). An implementation is four modules.
+  top_level has the fixed interface of tb_top_level.sv: it registers a_i and b_i at its input and
+  y_o at its output (two cycles of latency) and wires the other three between them. disp_a sits in
+  each row's dispatcher, sees only the A operands and feeds the 8 PEs of the row. disp_b sits in
+  each column's dispatcher, sees only the B operands and feeds the 8 PEs of the column. dp_8 sits
+  in every PE and sees only the two buses the dispatchers send. The encoding and width of those
+  buses are the implementation's choice. Work that depends on one operand only may move out of
+  dp_8 into that operand's dispatcher, where it costs 1/8 as much. One DP8 costs
+  area(dp_8) + (area(disp_a) + area(disp_b)) / 8, and power the same way; the registers are the
+  same in every design and are not counted. Its delay is the register-to-register path through a
+  dispatcher and dp_8, one combinational stage with no register between them. imp_v1/ is the
+  starting point: behavioral, with the SV `*` and a chain of adders. Look for
+  better structures: Booth or other recodings (NR4SD), bit-plane selection, operands
+  precomputed in the dispatchers, carry-save compressor trees, and so on. Each design is checked
+  by RTL simulation under tb_top_level.sv, the fixed golden model. It is then synthesized on
+  ASAP7, simulated at gate level, and its power is taken from that simulation's activity. Every
+  figure is compared with imp_v1, measured the same way. A design must keep at least 95% of
+  imp_v1's fmax and must not grow in area or power. Among those, the smallest area x power wins.
+
+contract: >-
+  One SystemVerilog file in four sections. Each section is opened by its own line
+  `// file: top_level.sv`, `// file: disp_a.sv`, `// file: disp_b.sv` or `// file: dp_8.sv`, and
+  holds that module and the helper modules it uses. Helper names must be unique across the file.
+  top_level keeps exactly the ports module top_level(input logic clk_i, input logic rst_ni,
+  input logic [7:0] a_i [0:7], input logic [3:0] b_i [0:7], output logic [14:0] y_o), with every
+  a_i[k] and b_i[k] signed, and keeps imp_v1's registers: a_i and b_i registered at the input, y_o
+  at the output, all reset to 0 by rst_ni. Besides them it has no logic of its own: it only
+  instantiates disp_a as u_disp_a (fed from the registered A only), disp_b as u_disp_b (fed from
+  the registered B only) and dp_8 as u_dp_8 (fed from the two dispatchers' outputs only, driving
+  the output register), and wires them. The other ports and the buses are yours; anything with
+  several lanes is an unpacked array, not a packed vector. disp_a, disp_b and dp_8 are
+  combinational: no flip-flops, latches or memories. For every input, y_o equals the dot product
+  exactly, two cycles later. The file must synthesize with Yosys and yosys-slang and must
+  simulate in Verilator, with no initial blocks,
+  $display or DPI.
+
+language: systemverilog
+
+gate:
+  - name: rtl_sim
+    run: "{python} {home}/eval.py check {artifact}"
+    timeout_s: 900
+
+stages:
+  - name: postsyn
+    command: "{python} {home}/eval.py measure {artifact} --n 8 --clk-ns 1.0"
+    metrics: [fmax_ratio, area_ratio, power_ratio, ap_ratio, fmax_mhz, area_um2, power_uw,
+              a_bus_bits, b_bus_bits]
+    needs: [yosys, iverilog]
+    timeout_s: 3600
+
+objectives:
+  - {metric: fmax_ratio, direction: maximize, goal: 0.95}
+  - {metric: area_ratio, direction: minimize, goal: 1.0}
+  - {metric: power_ratio, direction: minimize, goal: 1.0}
+  - {metric: ap_ratio, direction: minimize}
+
+flow:
+  generate:
+    agent: {preset: claude, timeout_s: 3600}
+  knowledge: none
+
+knowledge:
+  files: [tb_top_level.sv, imp_v1/top_level.sv, imp_v1/disp_a.sv, imp_v1/disp_b.sv, imp_v1/dp_8.sv]
+
+budget:
+  prototype: false
+  steps: 3
+  repair_attempts: 4
