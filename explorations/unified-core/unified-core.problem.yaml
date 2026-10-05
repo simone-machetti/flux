@@ -1,0 +1,110 @@
+# -----------------------------------------------------------------------------
+# Author: Simone Machetti
+#
+# Description:
+#   Optimize unified-core's BFP PE grid (top_NxN_nr4sd_bfp, at N = 2) for area and power,
+#   starting from the NR4SD implementation (imp_v1/). Claude Code writes each new
+#   implementation; eval.py checks it, measures it and saves it as the next imp_vN/.
+# -----------------------------------------------------------------------------
+
+id: unified_core
+
+statement: >-
+  Optimize unified-core's block-floating-point PE grid, top_NxN_nr4sd_bfp, for area and power at
+  nearly the same speed. The grid has N x N processing elements; operand A (mantissa and
+  exponent) is shared along each row and operand B along each column, so PE[r][c] evaluates
+  A[r] . B[c] in block floating point, in one of 11 modes decoded by ctrl. Each row has a
+  dispatcher (disp_array_a, disp_array_exp_a_bfp), each column has one (disp_array_b_nr4sd_bfp,
+  which also recodes B into NR4SD+ and Booth digits, and disp_array_exp_b_bfp), and every PE
+  (pe_nr4sd_bfp) holds 16 DP8s (dp_8_nr4sd_bfp), a compression tree with the BFP aligners
+  (pe_array_nr4sd_bfp) and an accumulator (acc_array_bfp). Each output is valid 3 clocks after its
+  operands. imp_v1/ is this design, the starting point. Below the top level the arithmetic may
+  change: the DP8's encoding, the compression tree, the accumulator, what the dispatchers
+  precompute and send, and the control tables. Work moved from the PEs into the dispatchers is
+  paid once per row or column instead of once per PE. The fixed parts are the two testbenches,
+  the top level's name, parameter and ports, the latency, imp_v1's clock gating, and the results
+  the functional testbench checks. Those results are bit-exact at equal exponents. With distinct
+  exponents the output exponents are exact, and each mantissa must fall inside the window the
+  testbench computes from imp_v1's own tree: the same alignment points, the same pairing of DP8s
+  and the same truncation. Look for better architectures: other DP8 recodings (Booth, bit-plane
+  selection), operands precomputed in the dispatchers, cheaper compressor trees and accumulators,
+  and so on. Every change needs an architectural reason with a mathematical explanation: fewer
+  partial products, fewer adder levels or full adders, narrower datapaths, work shared across a
+  row or column, a cheaper encoding of the same values. Rewriting the same logic in a different
+  syntax, or restructuring code only to coax the synthesizer into a better netlist, is not an
+  optimization here and is not wanted. Everything is measured on the 2 x 2 grid. Each design must
+  first pass the functional testbench completely in RTL simulation. It is then synthesized on ASAP7
+  at a 1.0 ns clock and timed, and it must pass the functional testbench completely again on the
+  netlist. Last, the power testbench runs on the netlist with 100 uniform random operand sets per
+  mode, all 11 modes back to back, and the power is the average over that whole run. Every
+  figure is compared with imp_v1, measured the same way. A design must keep at least 95% of
+  imp_v1's fmax and must not grow in area or power. Among those, the smallest area x power wins.
+
+contract: >-
+  One SystemVerilog file holding only what differs from imp_v1/: one section per changed or new
+  file, each opened by its own line `// file: <name>.sv` and followed by that file's complete
+  content. Every file left out is taken from imp_v1/ unchanged. As in imp_v1/, one module per
+  file, named like the file. Each changed or new file states in the Description of its header the
+  architectural change it makes and the mathematical reason it saves area or power; a change
+  without such a reason (a syntax rewrite, a reordering for the synthesizer) is not allowed. The
+  file also holds a section opened by the line `// file: README.md`: the version's documentation
+  in Markdown, saved as imp_vN/README.md so it can be reviewed later; eval.py appends the measured
+  results to it, so it does not report numbers it has not measured. It describes what changed
+  and the strategy applied, in detail: the idea of the version in a few sentences; what it changes
+  against imp_v1/ and, when it improves an earlier design, what it adds to that design; for each
+  changed or new file, the new structure and how it differs from the old one; the mathematical
+  explanation of why the result is still correct (bit-exact at equal exponents, inside the
+  testbench's window at distinct exponents) and of why it saves area or power, with the counts
+  that show it (partial products, full adders, adder levels, datapath and bus widths, register
+  bits, before and after); the expected effect on the critical path; when work moves into the
+  dispatchers, the number of wires from the dispatchers to the PEs (each row bus and each column
+  bus), before and after, reported even though no metric counts it; and the alternatives
+  considered and why they were set aside. A design without this section is refused. The
+  clock gating stays as in imp_v1/. tb_top_NxN_nr4sd_bfp.sv, tb_top_NxN_nr4sd_bfp_pwr.sv and
+  asap7_seq_behav.v cannot change. top_NxN_nr4sd_bfp keeps exactly imp_v1's parameter N and
+  ports, with the same meaning, the same reset, the same row and column enables, and outputs valid
+  3 clocks after their operands. With N = 2, tb_top_NxN_nr4sd_bfp must report every mode x pattern
+  x experiment passed with 0 mismatches, both in RTL simulation and on the synthesized netlist.
+  The design must synthesize with Yosys and yosys-slang and must simulate in Verilator, with no
+  initial blocks, $display or DPI.
+
+language: systemverilog
+
+gate:
+  - name: rtl_sim
+    run: "{python} {home}/eval.py check {artifact}"
+    timeout_s: 7200
+
+stages:
+  - name: postsyn
+    command: "{python} {home}/eval.py measure {artifact} --clk-ns 1.0"
+    metrics: [fmax_ratio, area_ratio, power_ratio, ap_ratio, fmax_mhz, area_um2, power_uw]
+    needs: [yosys, verilator]
+    timeout_s: 43200
+
+objectives:
+  - {metric: fmax_ratio, direction: maximize, goal: 0.95}
+  - {metric: area_ratio, direction: minimize, goal: 1.0}
+  - {metric: power_ratio, direction: minimize, goal: 1.0}
+  - {metric: ap_ratio, direction: minimize}
+
+flow:
+  generate:
+    agent: {preset: claude, timeout_s: 7200}
+  knowledge: none
+
+knowledge:
+  files: [tb_top_NxN_nr4sd_bfp.sv,
+          imp_v1/top_NxN_nr4sd_bfp.sv, imp_v1/ctrl.sv, imp_v1/icg.sv, imp_v1/reg_n.sv,
+          imp_v1/disp_array_a.sv, imp_v1/disp_array_exp_a_bfp.sv,
+          imp_v1/disp_array_b_nr4sd_bfp.sv, imp_v1/disp_array_exp_b_bfp.sv,
+          imp_v1/pe_nr4sd_bfp.sv, imp_v1/pe_array_nr4sd_bfp.sv, imp_v1/acc_array_bfp.sv,
+          imp_v1/dp_8_nr4sd_bfp.sv, imp_v1/nr4sd_r4.sv, imp_v1/nr4sd_r4_cell.sv,
+          imp_v1/booth_r4_cell.sv, imp_v1/align_cell_bfp.sv, imp_v1/sub_n_bfp.sv,
+          imp_v1/shift_n_bfp.sv, imp_v1/shift_n.sv, imp_v1/cpr_w_n.sv, imp_v1/add_n.sv,
+          imp_v1/ext_n.sv, imp_v1/fa.sv, imp_v1/gate_n.sv, imp_v1/gate_b_n.sv, imp_v1/mux_n.sv]
+
+budget:
+  prototype: false
+  steps: 3
+  repair_attempts: 4
