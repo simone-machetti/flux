@@ -486,6 +486,23 @@
     return l || (bare ? "" : "text");
   }
 
+  /** D832: the language the chosen checks' and measurements' tools take, as the loader infers it
+      when the document does not say one ("" when none tells: a script of one's own, a command). */
+  function impliedLanguage(state, cat) {
+    var hdl = ["systemverilog", "verilog"], found = null;
+    (state.checks || []).concat(state.stages || []).forEach(function (row) {
+      var t = toolOf(row.tool, cat), langs = t ? (t.languages || []) : [];
+      if (!langs.length) return;
+      var onlyHdl = langs.every(function (l) { return hdl.indexOf(l) >= 0; });
+      if (langs.length !== 1 && !onlyHdl) return;
+      found = found === null ? langs.slice() : (found.filter(function (l) { return langs.indexOf(l) >= 0; }).length
+        ? found.filter(function (l) { return langs.indexOf(l) >= 0; }) : found);
+    });
+    if (!found || !found.length) return "";
+    if (found.indexOf("systemverilog") >= 0 && found.every(function (l) { return hdl.indexOf(l) >= 0; })) return "systemverilog";
+    return found.length === 1 ? found[0] : "";
+  }
+
   function knobNames(state) {
     return (state.space || []).filter(function (r) { return String(r.knob || "").trim() && list(r.choices).length; })
       .map(function (r) { return r.knob.trim(); });
@@ -676,9 +693,9 @@
       var kv = boxVal("knowledge"), K = {}, kfiles = list(state.knowledgeFiles);
       if (kfiles.length) K.files = kfiles;
       var dg = (state.flow || {}).digest;                  // D784, D791: the Digest box -- the model unless an agent
-      if (typeof dg === "string" && dg.indexOf("agent:") === 0) K.by = dg.slice(6);
+      if (typeof dg === "string" && dg.indexOf("agent:") === 0) K.digest = dg.slice(6);      // D830: by name, as every box
       var ls = (state.flow || {}).lessons;                 // D796: the Learn box
-      if (ls && ls !== "off") K.lessons = typeof ls === "string" && ls.indexOf("agent:") === 0 ? { by: ls.slice(6) } : ls;
+      if (ls && ls !== "off") K.lessons = typeof ls === "string" && ls.indexOf("agent:") === 0 ? ls.slice(6) : ls;
       if (kv === "none" || kv === "off") K = K.lessons ? { off: true, lessons: K.lessons } : { off: true };
       if (Object.keys(K).length === 1 && K.off) F.push("  knowledge: off");
       else if (Object.keys(K).length) F.push("  knowledge: " + inline(K, false));
@@ -717,7 +734,9 @@
     if (!id) error("Give the problem a name (letters, digits and _).");
     else if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(id)) error("The name \"" + id + "\" should be a letter, then letters, digits or _.");
     if (!String(state.statement || "").trim()) error("Say what you want made (the statement is empty).");
-    if (!lang) warn("Choose the design's language.");
+    var implied = impliedLanguage(state, cat);
+    if (!lang && !implied) note("The language is not said and no chosen tool tells it: the design is a .txt file -- choose one if the checks need another kind.");
+    if (!lang) lang = implied;                         // D832: what the loader will take
 
     function params(row, what, nm) {
       var t = toolOf(row.tool, cat);
@@ -976,7 +995,13 @@
     var f = {};
     for (k in fl) {
       var key = k === "orchestrate" && isSearch(fl[k]) ? "dse" : k;            // D797: a search is the orchestrator's
-      f[key] = ["test", "measure"].indexOf(k) >= 0 ? fl[k] : toInner(key, fl[k]);   // D795
+      var val = fl[k];
+      if (k === "knowledge" && val && typeof val === "object" && !Array.isArray(val) && "digest" in val) {   // D830
+        val = Object.assign({}, val);
+        var dg2 = val.digest; delete val.digest;
+        if (dg2 && typeof dg2 === "object") Object.assign(val, dg2); else if (dg2 && dg2 !== "model") val.by = dg2;
+      }
+      f[key] = ["test", "measure"].indexOf(k) >= 0 ? val : toInner(key, val);   // D795
     }
     if ("test" in f) { out.gate = f.test; delete f.test; }
     if ("measure" in f) {
@@ -1263,6 +1288,7 @@
       promise of a line to show, `notes` on what is kept as written. */
   function mount(host, readonly, opts) {
     opts = opts || {};
+    var stepped = opts.stepped !== false;              // D826: steps unless a page asks for the whole form
     var state = opts.state || base();
     var openBox = null, openNode = null;
     var parts = {};
@@ -1500,13 +1526,14 @@
 
     // -- level 1
     function renderLevel1() {
-      var langs = [["", "Choose..."]].concat(LANGUAGES.map(function (l) { return [l, l]; })).concat([["other", "other..."]]);
+      var implied = impliedLanguage(state);                // D832: optional -- the tools usually tell
+      var langs = [["", implied ? "from the tools: " + implied : "from the tools (none tells yet)"]].concat(LANGUAGES.map(function (l) { return [l, l]; })).concat([["other", "other..."]]);
       var what = titled("1. What do you want?", [], [
         h("div", { class: "fc-line" }, [
           field(opts.nameLabel || "Name", function () { return state.id; }, function (v) { state.id = v; },
                 { compact: true, placeholder: opts.namePlaceholder || "my_design", hint: opts.nameHint || "Letters, digits and _" }),
           field("Language", function () { return state.language; }, function (v) { state.language = v; },
-                { compact: true, options: langs, structural: true, hint: "The language the designs are written in" }),
+                { compact: true, options: langs, structural: true, hint: "Optional: the language the designs are written in, when the checks' tools do not tell it" }),
           state.language === "other" ? field("Which language?", function () { return state.languageOther; }, function (v) { state.languageOther = v; }, { compact: true, placeholder: "ini" }) : null,
           ]),
         field("What should be made? Say it as you would to an engineer.", function () { return state.statement; },
@@ -1516,11 +1543,7 @@
                 function (v) { state.contract = v; }, { area: true, rows: 1, grow: true, placeholder: "Names, ports, what is not allowed" }),
           field("Files the model reads (optional)", function () { return state.knowledgeFiles; },
                 function (v) { state.knowledgeFiles = v; }, { compact: true, grow: true, placeholder: "spec.md, notes.txt", hint: "Beside the document, separated by commas" })]),
-        h("div", { class: "fc-line" }, [                    // D781, D791: who digests the papers of library/
-          field("Digest the papers in the Setup", function () { return state.flow.digest || "model"; },
-                function (v) { state.flow.digest = v; }, { compact: true, structural: true,
-                  options: BOXES.digest.choices.map(function (c) { return [c.value, c.label.split(":")[0].replace(/^The /, "")]; }),
-                  hint: "Papers go in library/ beside the document; each is summed up once" })]),
+        // D828: who digests library/'s papers is a box of the drawing ("Digest the papers"), not a field here
       ]);
       var kids = [what];
       if (!CATALOG.length) kids.push(h("p", { class: "fc-hint", text: "The tool list did not load; only Custom checks and measurements are offered." }));
@@ -1850,7 +1873,7 @@
           h("div", { class: "fc-row-buttons" }, [button("\u00d7", function () { state.space.splice(i, 1); changed(true); }, "fc-small fc-icon")])])]);
       });
       var searching = state.flow.dse && state.flow.dse !== "none";
-      var space = sub("Settings to search", searching ? "each is {its name} in the commands" : "used once \"Search the settings\" is on, in the drawing above", [
+      var space = sub("Settings to search", searching ? "each is {its name} in the commands" : "used once \"Search the settings\" is on, in the drawing (who does each step)", [
         h("div", { class: "fc-rows" }, knobs),
         button("+ Add a setting", function () { state.space.push({ knob: "", choices: "" }); changed(true); }, "fc-add-btn")]);
 
@@ -1874,11 +1897,69 @@
       return h("section", { class: "fc-section fc-advanced" }, [h("h3", {}, [toggle]), body]);
     }
 
+    // D826: steps instead of one long form -- a step bar, one step at a time, Back and Next; the
+    // document, its checklist and the save on the last step (and Save on every step when editing)
+    var STEPS = ["The problem", "Checks", "Measurements", "Objectives", "Who does each step", "More", "Review and save"];
+    // D828: what each step is for, in a line -- in place of the long form's numbered titles
+    var STEP_SAYS = [
+      "What the loop designs, in your words, and what every design must respect.",
+      "Each check refuses a wrong design. They run in order; the first that fails sends the design back to be repaired.",
+      "Each measurement sizes or times a design that passed the checks, cheapest first; a costly one runs only on the best of the cheaper.",
+      "What makes one design better: limits it must meet, then what to push, most important first.",
+      "Who works each step: built-in rules, a model, or a coding agent. Click a box to change it; the defaults are usually right.",
+      "The budget, settings to search over, and splitting one design into parts. An empty field keeps the default, shown greyed.",
+      ""];
     function renderForm() {
       parts.form.innerHTML = "";
-      parts.form.appendChild(renderLevel1());
-      parts.form.appendChild(renderLevel2());
-      parts.form.appendChild(renderLevel3());
+      if (!stepped) {
+        parts.form.appendChild(renderLevel1());
+        parts.form.appendChild(renderLevel2());
+        parts.form.appendChild(renderLevel3());
+        return;
+      }
+      var step = parts.step || 0;
+      var bar = h("ol", { class: "fc-stepbar", role: "tablist" }, STEPS.map(function (t, i) {
+        return h("li", { class: (i === step ? "fc-on" : "") + (i < step ? " fc-done" : "") }, [h("button", { type: "button", role: "tab",
+          "aria-selected": i === step ? "true" : "false", on: { click: function () { go(i); } } }, [h("span", { class: "fc-num", text: String(i + 1) }), t])]);
+      }));
+      var body;
+      if (step <= 3) {
+        var kids = Array.prototype.slice.call(renderLevel1().childNodes), n = kids.length;
+        body = step === 0 ? kids.slice(0, n - 3) : [kids[n - 4 + step]];
+      } else if (step === 4) {
+        var was = opts.foldSteps; opts.foldSteps = false; body = [renderLevel2()]; opts.foldSteps = was;
+      } else if (step === 5) {
+        parts.advancedOpen = true; body = [renderLevel3()];
+      } else {
+        body = [h("p", { class: "fc-hint", text: opts.save ? "The document as the steps say it, what is left to do, and the save." :
+          "The document as the steps say it, and what is left to do. Copy or download it." })];
+      }
+      var back = step > 0 ? button("Back", function () { go(step - 1); }) : null;
+      var next = step < STEPS.length - 1 ? button("Next: " + STEPS[step + 1], function () { go(step + 1); }, "fc-primary") : null;
+      var nav = h("div", { class: "fc-stepnav" }, [back, h("span", { class: "fc-grow" }), opts.save && step < STEPS.length - 1 ? button(opts.saveLabel || "Save", function () { parts.saveBtn.click(); }) : null, next]);
+      body.forEach(function (el) {                       // the long form's titles: the step bar says them
+        if (!el.querySelectorAll) return;
+        var t = el.querySelector("h3");
+        if (t && step !== 6) t.parentNode.removeChild(t);
+        Array.prototype.forEach.call(el.querySelectorAll(".fc-advanced-body"), function (b) { b.hidden = false; });
+      });
+      if (STEP_SAYS[step]) body.unshift(h("p", { class: "fc-step-says", text: STEP_SAYS[step] }));
+      var last = step === STEPS.length - 1;
+      if (parts.out) {                                   // the document is the last step's own, inside it
+        parts.out.hidden = !last;
+        if (last) body.push(parts.out);
+        else if (parts.bodyEl && parts.out.parentNode !== parts.bodyEl) parts.bodyEl.appendChild(parts.out);
+      }
+      parts.form.appendChild(bar);
+      parts.form.appendChild(h("div", { class: "fc-step" + (last ? " fc-step-last" : "") }, body));
+      parts.form.appendChild(nav);
+      if (step === 4) setTimeout(renderDiagram, 0);
+    }
+    function go(i) {
+      parts.step = Math.max(0, Math.min(STEPS.length - 1, i));
+      renderForm();
+      renderOutput();
+      if (parts.form.scrollIntoView && parts.form.getBoundingClientRect && parts.form.getBoundingClientRect().top < 0) parts.form.scrollIntoView();
     }
 
     function renderOutput() {
@@ -1937,14 +2018,17 @@
     }, "fc-primary") : null;
     var keptNotes = (opts.notes || []).length ? [h("h4", { text: "Kept as written" }),
       h("ul", { class: "fc-checks" }, opts.notes.map(function (n) { return h("li", { class: "fc-note", text: n }); }))] : [];
-    var out = h("div", { class: "fc-output" }, [
+    parts.saveBtn = saveBtn;
+    var out = parts.out = h("div", { class: "fc-output" }, [
       h("div", { class: "fc-output-head" }, [parts.file, saveBtn, parts.copyBtn, button("Download", download), parts.saved]),
       h("pre", { class: "fc-yaml" }, [parts.code]),
       h("h4", { text: "Checklist" }), parts.checks].concat(keptNotes).concat(opts.nextSteps === false ? [] : [
       h("h4", { text: "Next steps" }),
       h("p", { class: "fc-hint", text: "Save the file with the files it names, then:" }),
       h("pre", {}, [parts.next])]));
-    host.appendChild(h("div", { class: "fc-body" }, [parts.form, out]));
+    parts.bodyEl = h("div", { class: "fc-body" + (stepped ? " fc-stepped" : "") }, [parts.form, out]);
+    host.appendChild(parts.bodyEl);
+    if (stepped) drawing();                            // the drawing's parts exist before its step is shown
     parts.pop = h("div", { class: "fc-pop", role: "dialog", hidden: "hidden" });
     host.appendChild(parts.pop);
     document.addEventListener("keydown", function (ev) {

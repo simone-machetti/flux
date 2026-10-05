@@ -35,14 +35,15 @@ adds the README's first run. Prints PASS, FAIL or SKIP per check; exits 1 when o
 ## Start a problem
 
 ```bash
-flux new NAME --kind python|rtl|sweep|tune|rtl-sweep     # a working problem to start from
+flux example python|rtl|sweep|tune|rtl-sweep NAME     # a working problem to start from
 flux ask "what you want" --file spec.pdf                 # an author writes the problem for you
 flux ask --tui                                           # the same, from a setup screen
 ```
 
-- `flux new NAME` writes `NAME/problem.yaml`, its golden model or checker, and a README
-  (`--dir D`: into `D/NAME/`). The
-  [cookbook](cookbook.md) says which kind fits which problem.
+- `flux new NAME` writes a loop's baseline (D825): `NAME/problem.yaml` with every part present and what goes there,
+  a README of what each part of the folder is for, an empty `library/` (`--dir D`: into `D/NAME/`) -- nothing of a case.
+  `flux example KIND NAME` writes a worked example that runs (sweep, tune, python, rtl, rtl-sweep); the
+  [cookbook](cookbook.md) says which fits which problem.
 - `flux ask` has an author (the model by default, or `--author opencode|claude|codex`) write
   the document and its files into `./out/ask_<slug>/`. It checks the document, runs it, and
   gives the author the report to revise for the next pass. Options: `--no-run` (write and
@@ -75,10 +76,10 @@ flow:
   select: {finalists: 2}
 ```
 
-There is no `world:` or `hooks:` (D803): what a document cannot say is a command beside it -- a search (`orchestrate: {command: "... {history} {state} {params}"}`, D799), sub-loops in folders whose parent's `generate` composes them (`{parts}`, D801) -- a parent's `generate` that is a model or an agent (`generate: claude`) drafts for them instead, inherited like any box (D804). A search is the orchestrator's (D797): `orchestrate: {policy: sweep, space: {...}}` -- there is no `dse:`; the record's lessons are `knowledge: {lessons: mined}` and `brief` is gone (D796). Every box says who works it the same way (D795): a word (`rules`, `model`, `off`), an agent's name (`critique: claude`), or `{by: claude, session: pass, ...the box's settings}`. `flow.test` is a map by name like `flow.measure` (`lint: ...`, `golden: {run: ..., timeout_s: 300}`; a check named `build` refuses on any non-zero exit, D789). `parts` is a list of names or a map from each name to what it is (D792). The measurement cache is always on and keyed on the stage's command, the scripts it names and the params (D790); there is no `cache:`, `workbench:`, `joiner:` or `max_parts:`. `flow.knowledge: off` turns the library off; `flow.calibrate: off` the calibration. This is the
+There is no `world:` or `hooks:` (D803): what a document cannot say is a command beside it -- a search (`orchestrate: {command: "... {history} {state} {params}"}`, D799), sub-loops in folders whose parent's `generate` composes them (`{parts}`, D801) -- a parent's `generate` that is a model or an agent (`generate: claude`) drafts for them instead, inherited like any box (D804). A search is the orchestrator's (D797): `orchestrate: {policy: sweep, space: {...}}` -- there is no `dse:`; the record's lessons are `knowledge: {lessons: mined}` and `brief` is gone (D796). Every box says who works it the same way (D795): a word (`rules`, `model`, `off`), an agent's name (`critique: claude`), or, only to give it options, `{by: claude, session: pass, ...the box's settings}` (D830: the name alone otherwise -- `plan: opencode`). Knowledge says who digests its papers as `digest:` and who writes lessons as `lessons:`, by name too: `knowledge: {files: [spec.md], digest: claude, lessons: mined}`. `flow.test` is a map by name like `flow.measure` (`lint: ...`, `golden: {run: ..., timeout_s: 300}`; a check named `build` refuses on any non-zero exit, D789). `parts` is a list of names or a map from each name to what it is (D792). The measurement cache is always on and keyed on the stage's command, the scripts it names and the params (D790); there is no `cache:`, `workbench:`, `joiner:` or `max_parts:`. `flow.knowledge: off` turns the library off; `flow.calibrate: off` the calibration. This is the
 only layout (D783): a top-level `gate:`, `stages:`, `space:`, `seeds:` or `knowledge:` is a key a
 document does not have, and `budget` takes no `finalists` or `calibrate`. A document of an earlier form
-is brought to this one by `flux task migrate FOLDER [--write]`, or by an admin in Admin › Documents (D811):
+is brought to this one by `flux task migrate FOLDER [--write]`, or by an admin from Admin › Loops' "Migrate documents of an earlier form" (D811, D816):
 each change said, a result written only when it loads, the original kept as `<file>.orig`; a `world:`
 or `hooks:` is said for a person to rewrite as commands.
 
@@ -150,7 +151,7 @@ itself (a PDF's tables and figures too) and is gated by its Test like any agent 
 
 ```yaml
 flow:
-  knowledge: {by: opencode}  # or claude, codex, or a full agent spec; unsaid = the loop's model (D773)
+  knowledge: {digest: opencode}  # who sums up library/'s papers: model (default), an agent, {by: agent, ...options} (D773, D830)
 ```
 
 In the configurator's drawing it is the **Digest the papers** box (the model, or a coding agent; D784, D791). A Setup digests at most 8 new papers (`FLUX_DIGEST_PER_PASS`), the loop's own first;
@@ -308,7 +309,8 @@ flux serve                           # http://127.0.0.1:8765/ ; --host 0.0.0.0 b
     exit; its thinking, the commands it ran, the last command's output and its words, each a stream
     that follows its end and keeps its place when read upward. Under it, the log as it grows, coloured as the Log tab, problems only on demand, and each line's
     time with **times** (D732: a run writes every line with its time; the setting is one for both logs,
-    kept per browser; lines from before have none). A line
+    kept per browser, on unless turned off; lines from before have none). A time carries its day, `Oct 05 14:03:22`
+    (D816), so a run of several days reads. A line
     docked at the bottom sends notes to the loop (Enter sends, Shift+Enter breaks the line); when
     the agent asks, it shows the question and answers it. Standings show as counts, the frontier and the parts. It shows the
     latest start's tree.
@@ -423,7 +425,9 @@ flux serve                           # http://127.0.0.1:8765/ ; --host 0.0.0.0 b
   command line (`flux.env`) the sandbox mounts the program itself, the file alone with its link followed,
   and names it so inside (D804): a link in `~/.config/flux` works without the key beside it going in.
 - **Models (Admin › Models, Account):** a tab per tool (D721) -- Flux (its own model, and the agent by
-  default), one per agent offered (D807), Other (Ollama's URL and model, OpenRouter's key); a tab with
+  default; its endpoint is any OpenAI-compatible one -- a hosted one, OpenRouter's, a local Ollama's /v1, D817), one per
+  agent offered (D807); `OLLAMA_BASE_URL`, `FLUX_LLM_MODEL` and `OPENROUTER_API_KEY` are no settings, but variables when
+  one wants them (the command line reads them as before); a tab with
   settings of its own is marked •, one Save covers them all. Each agent's tab is its own: an endpoint, a
   model and a key as its kind reads them (`FLUX_<AGENT>_BASE_URL`, `_MODEL`, `_API_KEY`) -- an OpenCode gets
   them as a provider (the built-in OpenCode, with none of its own, Flux's model's), Claude Code and Codex as
@@ -436,6 +440,11 @@ flux serve                           # http://127.0.0.1:8765/ ; --host 0.0.0.0 b
   gets none of the server's values of that group. Keys are stored encrypted (`secret.key` beside
   the server's data) and never shown again. With nothing set, runs use the machine's own
   configuration (flux.env, OpenCode's and Claude Code's own).
+- **`language:` is optional** (D832): unsaid, the tools the checks and stages name tell it (`flux rtl ...`: SystemVerilog, a ChampSim build: C++); say it when they do not -- a script of your own, `flux prog` -- or the design is a `.txt` file.
+- **Settings save as you change them** (D833): Account, Admin (agents, sandbox, a user's running limit) and a loop's Advanced have no Save button; a mark beside the field says saved or why not. A key saves when you leave its field. The document (Direct edit, the configurator) keeps Save.
+- **The configurator** (D826) is seven steps -- the problem, checks, measurements, objectives, who does each step, more (budget, search, parts), review and save -- one at a time, Back and Next, Save on every step when editing a loop.
+- **Cloning** (D824, D828): "Clone…" on a loop (or New loop › Clone a loop) makes a new loop of yours with its problem and none of its runs, its workbench when asked.
+- **Invitations** (D818): an admin adds a user without a password (Users, or `flux user add NAME --invite --url https://flux.example`) and gets a link to send them -- it lets them choose their password (10 or more characters) and logs them in; until then the account cannot be used. **Password reset link** (Users, or `flux user link NAME`) is the same for an existing user: their password works until the link is used, and their sessions end then. A link works once, for a week; a new one replaces it. There is no mail: the admin sends it.
 - **Kinds of user** (D734; the Users tab, or `flux user add NAME --role internal|external|admin`, `flux user role NAME --role ...`):
   - **internal** (the default): their runs use the server's model, agent and environment settings, under their own.
   - **external**: their runs get none of the server's or the machine's model and agent settings, nor the server's
@@ -454,12 +463,12 @@ flux serve                           # http://127.0.0.1:8765/ ; --host 0.0.0.0 b
     **Each day** (D807) an agent a user tested is tested again, one at a time: an answer keeps its login fresh;
     a failure is told to the user (the bell) and their loops that need it wait until a Test passes again.
   - **admin**: internal, and the admin pages.
-- **Admin** (tabs: Loops, Insights, Applications, Documents, Resources, Sandbox, Agents and models, Users, Audit):
-  - **Documents** (D811): every loop's documents of an earlier form -- what each would change (the steps, the
+- **Admin** (tabs: Loops, Insights and audit, Applications, Resources, Sandbox, Agents and models, Users):
+  - **Loops' "Migrate documents of an earlier form…"** (D811, D816): every loop's documents of an earlier form -- what each would change (the steps, the
     result), where it goes (`<id>.problem.yaml` with an `id:` becomes `problem.yaml`; the record follows a
     renamed id) -- migrated one loop at a time or all at once; a running loop is left until stopped; a loop's
     Start says when its document needs it.
-  - **Insights** (D766): over the last day, 7 or 30 days -- the starts that failed with why (their log's
+  - **Insights and audit** (D766, D816, D819; a sub-tab each -- Failures, Usage and disk, Endpoints and network, Audit trail): over the last day, 7 or 30 days -- the starts that failed with why (their log's
     words) and the agents' Tests that failed; turns, tokens and cost by user and by agent or model, a bar a
     day, and the loops that used most; each model endpoint and agent with its turns, failures, median and
     slow (95%) time and its last failure; the hosts the sandboxes refused, by which loops; the disk by user
@@ -497,6 +506,7 @@ flux serve                           # http://127.0.0.1:8765/ ; --host 0.0.0.0 b
   the details. What happened comes in groups (D724): users and sign-in, runs, loops and their
   files, sharing and loop settings, server, network, and other; the filter offers the groups only (D733),
   each row keeping its exact kind.
+- **Every check at once** (D822): `python3 tests/check.py` (from `flux/`, in the dev shell) runs ruff, the unit suite, the heavy tests and the browser test side by side, a line each as it ends (about 2.5 minutes); `python3 tests/check.py unit e2e` some of them; `FLUX_E2E_STEPS="login refused,login,invitation,insights"` a few steps of the browser test (D821; the first two log the browser in).
 - **Browser test:** `python3 tests/e2e/web_ui.py` (from `flux/`, in the dev shell) starts its own
   `flux serve` with three users and walks the pages in headless Firefox. It covers login, New
   loop, upload, every tab, Files and `.gitignore`, Direct edit, variables, sharing, start and

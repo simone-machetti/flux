@@ -39,7 +39,7 @@ class Login(BaseModel):
 
 class NewUser(BaseModel):
     name: str
-    password: str
+    password: str | None = None              # D818: none -- an invitation link to set it
     role: str = "internal"
 
 
@@ -141,6 +141,15 @@ class AgentNew(BaseModel):               # D807: an agent the admin adds -- a na
     kind: str = Field(max_length=16)
     label: str = Field(default="", max_length=80)
     bin: str = Field(default="", max_length=1024)
+
+
+class EmptyIn(BaseModel):                # D825: a loop's baseline
+    name: str = Field(max_length=64)
+
+
+class CloneIn(BaseModel):                # D824: a loop's problem into a new loop of one's own
+    to: str = Field(max_length=64)
+    workbench: bool = False
 
 
 class MigrateIn(BaseModel):              # D811: one loop's documents, or every loop's
@@ -278,16 +287,52 @@ def create_app(data: str | Path, *, sandbox: bool = True, secure_cookie: bool = 
 
     @app.get("/api/users")
     def users(_a: User = Depends(admin_of)) -> list[dict[str, Any]]:
-        return [{"name": u.name, "role": u.role, "disabled": u.disabled} for u in store.users()]
+        return [{"name": u.name, "role": u.role, "disabled": u.disabled, "pending": store.pending(u.name)} for u in store.users()]
 
     @app.post("/api/users")
-    def add_user(body: NewUser, a: User = Depends(admin_of)) -> dict[str, str]:
+    def add_user(body: NewUser, a: User = Depends(admin_of)) -> dict[str, Any]:
+        """A user (D818: with no password, an invitation to set it -- the link's token, for the admin to send)."""
         try:
-            store.add_user(body.name, body.password, body.role)
+            u = store.add_user(body.name, body.password, body.role)
         except ValueError as exc:
             raise fail(exc) from exc
         store.audit(a.name, "add user", body.name)
-        return {"ok": body.name}
+        if body.password is not None:
+            return {"ok": u.name}
+        token, kind = store.invite(u.name)
+        store.audit(a.name, "invite user", u.name)
+        return {"ok": u.name, "token": token, "kind": kind}
+
+    @app.post("/api/users/{name}/link")
+    def user_link(name: str, a: User = Depends(admin_of)) -> dict[str, Any]:
+        """A new link for the user (D818): an invitation while their password is not set, else a reset;
+        the earlier one stops working. Their password stays as it is until the link is used."""
+        try:
+            token, kind = store.invite(name)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        store.audit(a.name, "invite user" if kind == "invite" else "password reset link", name)
+        return {"token": token, "kind": kind}
+
+    @app.get("/api/invite/{token}")
+    def invite_info(token: str) -> dict[str, Any]:
+        """For everyone (D818): whose link it is and what for, while it opens."""
+        got = store.invite_of(token)
+        if got is None:
+            raise HTTPException(404, "this link has been used or has expired: ask an admin for a new one")
+        return got
+
+    @app.post("/api/invite/{token}")
+    def invite_use(token: str, body: FileText, response: Response) -> dict[str, Any]:
+        """The password set from a link (D818), the user logged in, every other session of theirs ended."""
+        try:
+            u, session = store.use_invite(token, body.text)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        response.set_cookie(COOKIE, session, httponly=True, samesite="strict", secure=secure_cookie,
+                            max_age=SESSION_DAYS * 86400, path="/")
+        store.audit(u.name, "password set from a link")
+        return {"name": u.name, "role": u.role}
 
     @app.patch("/api/users/{name}")
     def change_user(name: str, body: UserChange, a: User = Depends(admin_of)) -> dict[str, str]:
@@ -313,7 +358,7 @@ def create_app(data: str | Path, *, sandbox: bool = True, secure_cookie: bool = 
 
     def _groups(agents: dict[str, Any]) -> list[dict[str, Any]]:
         """Flux's own settings, then a group per agent offered (D807: its kind's endpoint, model
-        and key, each its own), then the other providers -- a tab each."""
+        and key, each its own) -- a tab each (D817: no other providers' tab)."""
         from .agents import KINDS
         from .store import GROUPS
 
@@ -324,7 +369,7 @@ def create_app(data: str | Path, *, sandbox: bool = True, secure_cookie: bool = 
         per = [{"id": a.name, "label": f"{a.label} ({a.kind})" if not a.builtin else a.label, "tab": a.label,
                 "public": list(a.keys()["public"]), "secret": list(a.keys()["secret"]), "endpoint": a.keys()["public"][0],
                 "hint": KINDS[a.kind]["hint"], "labels": a.labels(), "agent": a.name} for a in agents.values()]
-        return [*(static(k, g) for k, g in GROUPS.items() if k != "other"), *per, static("other", GROUPS["other"])]
+        return [*(static(k, g) for k, g in GROUPS.items()), *per]
 
     def _keys_of(groups: list[dict[str, Any]]) -> dict[str, list[str]]:
         return {"public": [k for g in groups for k in g["public"]], "secret": [k for g in groups for k in g["secret"]]}
@@ -1438,6 +1483,33 @@ def create_app(data: str | Path, *, sandbox: bool = True, secure_cookie: bool = 
         if body.app and not done:
             raise HTTPException(404, f"nothing to migrate in {body.user}/{body.app}")
         return {"done": done, "migrated": sum(d["status"] == "migrated" for x in done for d in x["documents"])}
+
+    @app.post("/api/apps/new-empty")
+    def new_empty(body: EmptyIn, user: User = Depends(user_of)) -> dict[str, Any]:
+        """A loop's baseline (D825) -- the skeleton problem.yaml, the README of the folder's parts, an
+        empty library/ -- to fill in with the configurator. Nothing of a case."""
+        from flux_cli.commands import baseline_files
+
+        name = body.name.strip()
+        try:
+            meta = ws(user).create(name, [(rel, text.encode()) for rel, text in baseline_files(name)])
+        except WorkspaceError as exc:
+            raise fail(exc) from exc
+        (ws(user).app(name) / "library").mkdir(exist_ok=True)
+        store.audit(user.name, "empty loop", name)
+        return {"name": name, **meta}
+
+    @app.post("/api/apps/{name}/clone")
+    def clone_loop(name: str, body: CloneIn, owner: str | None = None, user: User = Depends(user_of)) -> dict[str, Any]:
+        """A loop cloned (D824) into the caller's own: any loop they can see -- their own, one shared with
+        them, for an admin anyone's. Its problem, never its runs'; its workbench when asked."""
+        _w, whose, d, _run = loop_of(name, user, owner)
+        try:
+            meta = ws(user).clone(body.to.strip(), d, workbench=body.workbench, source=f"{whose.name}/{name}")
+        except WorkspaceError as exc:
+            raise fail(exc) from exc
+        store.audit(user.name, "clone loop", f"{whose.name}/{name} -> {body.to.strip()}" + (" (with its workbench)" if body.workbench else ""))
+        return {"name": body.to.strip(), **meta}
 
     @app.post("/api/apps/{name}/validate")
     def validate_text(name: str, body: FileText, owner: str | None = None, user: User = Depends(user_of)) -> dict[str, Any]:

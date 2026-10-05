@@ -30,7 +30,7 @@ The tree follows the kinds of module the architecture is built from:
 | `interfaces/` | how it is driven: the CLI |
 | `tests/` | the unit suite (core + heavy), the integration suite |
 
-`applications/` is the part that grows. Ten today; `flux new` writes the start of another:
+`applications/` is the part that grows. Ten today; `flux new` writes the baseline of another (`flux example` a worked one):
 
 | application | the problem | the chain | the model's roles |
 |---|---|---|---|
@@ -104,6 +104,7 @@ loop and the CLI alone; see the repository README):
 
 ```sh
 cd flux
+nix develop --command python3 tests/check.py                     # every check at once: ruff, unit, heavy, e2e (~2.5 min, D822)
 nix develop --command python3 -m pytest -q tests/unit            # the core suite
 nix develop --command python3 -m pytest -q tests/unit -m heavy   # the slow, tool-backed tests (Yosys, OpenROAD, Verilator, z3, ChampSim)
 nix develop --command flux --help

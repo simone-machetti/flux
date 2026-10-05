@@ -15,7 +15,7 @@ say PASS.
 ## 1. Start from a template
 
 ```bash
-flux new isqrt --kind rtl
+flux example rtl isqrt
 ```
 
 This writes `isqrt/` with a document, a golden model and a README. It runs as it is (an 8-bit
@@ -103,7 +103,7 @@ No design reached 1000 MHz, and the report says so. Left running, the loop keeps
 |---|---|
 | let the model pick the next step | `--agent orchestrate`, or `flow: {orchestrate: agent}` |
 | let the model plan each pass | `--agent plan`, or `flow: {plan: model}` |
-| let a coding agent write the design | `flow: {generate: {by: opencode}}` (or `claude`, `codex`) |
+| let a coding agent write the design | `flow: {generate: opencode}` (or `claude`, `codex`) |
 | give the model a method note | `flow.knowledge: {files: [method-note.md]}` |
 | steer it while it runs | `--tui`, then `f` to type a note |
 

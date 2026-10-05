@@ -13,7 +13,7 @@ pre-written rules:
 
 | role | what a model can do there | how you turn it on |
 |---|---|---|
-| generator | write each design, repair it from the failures, make it cheaper | `flow: {generate: model}` (the default), or `{by: opencode}` |
+| generator | write each design, repair it from the failures, make it cheaper | `flow: {generate: model}` (the default), or `opencode` |
 | orchestrator | pick the next piece of work, with its reasons on the record | `--agent orchestrate`, or `flow: {orchestrate: agent}` |
 | planner | write the plan of a pass: parts, order, method, budgets | `--agent plan`, or `flow: {plan: model}` |
 | search | propose the next points of a knob space from what was measured | `flow: {orchestrate: {by: model}}`, or a `model` phase |
@@ -36,7 +36,7 @@ any OpenAI-compatible server (`FLUX_REMOTE_BASE_URL`, `FLUX_REMOTE_MODEL`,
 ## 1. Start from a template
 
 ```bash
-flux new isqrt --kind rtl
+flux example rtl isqrt
 ```
 
 This writes `isqrt/` with a problem document, a golden model and a README. It runs as it
@@ -155,7 +155,7 @@ Each of these is one flag or one line; mix them.
   model reads the standings and the record with tools, picks the next step, and records why.
 - **Let a model plan each pass:** `--agent plan` (or `flow: {plan: model}`): the parts, the order,
   the method to try first, the budgets. It is checked against the problem before it applies.
-- **Hand the writing to a coding agent:** `flow: {generate: {by: opencode}}` (or `claude`,
+- **Hand the writing to a coding agent:** `flow: {generate: opencode}` (or `claude`,
   `codex`). The agent writes; the loop runs the gate and brings failures back to it. With
   `prototype: true` the agent writes the Python prototype, which the loop checks with
   `flux rtl proto` before it writes the RTL.
@@ -184,7 +184,7 @@ budget: {steps: 12}  # every batch is a step: enough for all three phases
 On the `rtl-sweep` template (its knobs are `arch` and `chunk`) with 12 steps, `coarse` swept
 the architectures, `fine` moved `chunk` and raised fmax from 3,166 to 3,577 MHz, then `ideas`
 asked the model. With the template's `steps: 1` only the first phase runs.
-`flux new NAME --kind rtl-sweep` starts from this shape. The policies are `sweep`,
+`flux example rtl-sweep NAME` starts from this shape. The policies are `sweep`,
 `gradient`, `anneal`, `genetic`, `montecarlo`, `pareto` and `model` (the model proposes). The
 [cookbook](cookbook.md) says which suits which space.
 
@@ -192,9 +192,9 @@ asked the model. With the template's `steps: 1` only the first phase runs.
 
 | you have | start with |
 |---|---|
-| a Python function to write and speed up | `flux new NAME --kind python` |
-| a program whose settings to tune | `flux new NAME --kind tune` |
-| a script that writes designs from knobs | `flux new NAME --kind sweep` |
+| a Python function to write and speed up | `flux example python NAME` |
+| a program whose settings to tune | `flux example tune NAME` |
+| a script that writes designs from knobs | `flux example sweep NAME` |
 | only a description and some files | `flux ask "what you want" --file spec.pdf` |
 | an accelerator architecture for a workload | `applications/npu_gemm/`: a script writes the architecture, ZigZag measures it |
 

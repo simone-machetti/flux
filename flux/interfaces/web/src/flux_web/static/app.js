@@ -151,6 +151,30 @@ function appHref(user, app) {
   return user && me && user !== me.name ? `#/u/${enc(user)}/app/${enc(app)}` : `#/app/${enc(app)}`;
 }
 /** A button whose async action disables it while it runs, and says a failure as a notice. */
+/** D833: a field that saves as it changes -- a moment after typing stops, or on leaving it -- with a
+    mark beside it: saving, saved, or why the server refused it. `run()` saves; saves never overlap. */
+function saveMark() { return h("span", { class: "save-mark small", "aria-live": "polite" }); }
+function autosave(fields, run, mark, { delay = 900, typing = true } = {}) {
+  let t = null, chain = Promise.resolve(), clear = null;
+  const go = () => {
+    clearTimeout(t);
+    chain = chain.then(async () => {
+      clearTimeout(clear);
+      mark.className = "save-mark small"; mark.textContent = "saving…";
+      try {
+        await run();
+        mark.classList.add("ok"); mark.textContent = "saved";
+        clear = setTimeout(() => { if (mark.textContent === "saved") mark.textContent = ""; }, 2500);
+      } catch (x) { mark.classList.add("bad"); mark.textContent = x.message === "log in" ? "" : x.message; }
+    });
+    return chain;
+  };
+  for (const el of [].concat(fields)) {
+    if (typing) el.addEventListener("input", () => { clearTimeout(t); t = setTimeout(go, delay); });
+    el.addEventListener("change", go);
+  }
+  return go;
+}
 function act(label, fn, { cls = "", title } = {}) {
   const b = h("button", { class: cls, title, type: "button" }, label);
   b.addEventListener("click", async () => {
@@ -393,6 +417,45 @@ async function loginPage() {
     h("button", { class: "primary wide", type: "submit" }, "Log in"), err);
   show(form);
   name.focus();
+}
+
+/** D818: a link to set one's password -- for an invited user, or after a reset; one use, a week. */
+async function invitePage(token) {
+  const show = pageShow();
+  let got;
+  try { got = await api(`/invite/${enc(token)}`); }
+  catch (x) { show(h("div", { class: "card login" }, h("div", { class: "login-mark" }, logo(56)), h("h1", {}, "Flux"), h("p", { class: "err" }, x.message),
+    h("a", { class: "btn", href: "#/login" }, "Log in"))); return; }
+  const pw = h("input", { type: "password", autocomplete: "new-password", required: true, minlength: 10, id: "inv-pw" });
+  const pw2 = h("input", { type: "password", autocomplete: "new-password", required: true, id: "inv-pw2" });
+  const err = h("p", { class: "err" });
+  const form = h("form", { class: "card login", onsubmit: async (e) => {
+      e.preventDefault(); err.textContent = "";
+      if (pw.value.length < 10) { err.textContent = "At least 10 characters."; return; }
+      if (pw.value !== pw2.value) { err.textContent = "The two are not the same."; return; }
+      try { me = await api(`/invite/${enc(token)}`, { method: "POST", body: { text: pw.value } }); location.hash = "#/"; route(); }
+      catch (x) { err.textContent = x.message; }
+    } },
+    h("div", { class: "login-mark" }, logo(56)), h("h1", {}, "Flux"),
+    h("p", { class: "sub" }, got.kind === "invite" ? `Welcome, ${got.name}: choose your password.` : `${got.name}: choose a new password.`),
+    h("label", { class: "stack" }, "Password (10 or more characters)", pw), h("label", { class: "stack" }, "Again", pw2),
+    h("button", { class: "primary wide", type: "submit" }, got.kind === "invite" ? "Set it and log in" : "Change it and log in"), err,
+    h("p", { class: "muted small" }, `This link works once, until ${new Date(got.expires * 1000).toLocaleString()}.`));
+  show(form);
+  pw.focus();
+}
+
+/** D818: the link an admin sends -- shown with a copy button; it is never shown again. */
+function linkDialog(name, token, kind) {
+  const url = `${location.origin}${location.pathname}#/invite/${token}`;
+  const field = h("input", { value: url, readonly: true, class: "mono", style: "width:100%", id: "invite-url" });
+  const copy = h("button", { type: "button", class: "small", onclick: async () => {
+    try { await navigator.clipboard.writeText(url); toast("Copied", "ok"); } catch (_) { field.select(); toast("Selected: copy it", "info"); } } }, "Copy");
+  return dialog(kind === "invite" ? `Invite ${name}` : `${name}: a password reset link`, h("div", { class: "stack" },
+    h("p", {}, kind === "invite" ? `Send ${name} this link: it lets them choose their password and log in. Until then the account cannot be used.`
+      : `Send ${name} this link: it lets them choose a new password; their current one works until then, and their sessions end when it is used.`),
+    h("div", { class: "row" }, field, copy),
+    h("p", { class: "muted small" }, "It works once, for a week, and is not shown again; a new link replaces it.")), [["Done", true, "primary"]]);
 }
 
 /** Start or stop a loop: the dialog for a start's options, a confirm for "now". */
@@ -867,10 +930,11 @@ function envTable(rows, shadowed = new Set()) {
       h("td", { class: "mono" }, x.secret ? h("span", { class: "muted" }, "secret · set") : x.value), h("td", { class: "muted" }, x.from, shadowed.has(x.name) ? " · overridden" : "")))));
 }
 function envEditor(rows, save, scope) {
-  const nameIn = h("input", { placeholder: "NAME", class: "mono", id: `env-${scope}-name`, style: "width:180px", autocomplete: "off" });
-  const valIn = h("input", { placeholder: "value", class: "mono", id: `env-${scope}-value`, style: "flex:1;min-width:160px", autocomplete: "off" });
+  const quiet = { "data-lpignore": "true", "data-1p-ignore": "true", "data-form-type": "other" };     // D820: no password manager here
+  const nameIn = h("input", { placeholder: "NAME", class: "mono", id: `env-${scope}-name`, style: "width:180px", autocomplete: "off", ...quiet });
+  const valIn = h("input", { placeholder: "value", class: "mono", id: `env-${scope}-value`, style: "flex:1;min-width:160px", autocomplete: "off", ...quiet });
   const secret = h("input", { type: "checkbox", id: `env-${scope}-secret` });
-  secret.addEventListener("change", () => { valIn.type = secret.checked ? "password" : "text"; });
+  secret.addEventListener("change", () => { valIn.type = secret.checked ? "password" : "text"; valIn.autocomplete = secret.checked ? "new-password" : "off"; });
   const list = rows.length ? h("table", { class: "list compact env" }, h("tbody", {}, rows.map(x => h("tr", {}, h("td", { class: "mono" }, x.name),
       h("td", { class: "mono" }, x.secret ? h("span", { class: "muted" }, "secret · set") : x.value),
       h("td", { class: "right" }, save ? act("Remove", async () => { await save({ name: x.name, value: null }); toast(`${x.name} removed`, "ok"); }, { cls: "small" }) : "")))))
@@ -897,6 +961,18 @@ function advancedCard(e, save, saveLabel = "Save") {
   const mem = f("memory", "no limit"), cpus = f("cpus", "no limit"), pids = f("pids", "4096"), tmp = f("tmp_size", "no limit");
   const par = h("input", { type: "checkbox", checked: !!a.parallel, id: "adv-parallel" });
   const hosts = h("textarea", { id: "adv-allow", rows: 2, class: "mono", placeholder: "huggingface.co\n10.1.2.0/24", value: (a.allow || []).join("\n") });
+  // D833: saved as they change; turning the sandbox off asks first
+  const mark = saveMark();
+  const collect = () => ({ sandbox: sb.checked, memory: mem.value.trim() || null, cpus: cpus.value.trim() || null,
+    pids: pids.value.trim() ? Number(pids.value) : null, tmp_size: tmp.value.trim() || null, parallel: par.checked,
+    allow: hosts.value.split(/[\n,]/).map(x => x.trim()).filter(Boolean) });
+  const go = autosave([mem, cpus, pids, tmp, par, hosts], () => save(collect()), mark);
+  sb.addEventListener("change", async () => {
+    if (!sb.checked && !await confirmDialog("Run this loop on the host?", "Its document's commands and its agents run on this machine, outside the sandbox, as the server's user.", { ok: "Run on the host", danger: true })) {
+      sb.checked = true; return;
+    }
+    go();
+  });
   return card("Advanced (admins)", [h("p", { class: "muted" }, "Apply from the loop's next start, whoever starts it.",
       e.sandboxed_server ? "" : " This server runs without the sandbox (--no-sandbox): the limits do nothing."),
     h("label", { class: "check" }, sb, "Run in the sandbox (off: on the host, with this machine's files and network: only for code you trust)"),
@@ -904,12 +980,7 @@ function advancedCard(e, save, saveLabel = "Save") {
       h("label", { class: "stack" }, "Processes", pids), h("label", { class: "stack" }, "Scratch /tmp", tmp)),
     h("label", { class: "check" }, par, "Allow parallel work: tool runs and parts at once, as many as the document asks (budget.workers, parallel_parts); off: one at a time"),
     h("label", { class: "stack" }, "Hosts this loop may reach as well, under a network allowlist (one per line)", hosts),
-    h("div", { class: "form-actions" }, act(saveLabel, async () => {
-      if (!sb.checked && !await confirmDialog("Run this loop on the host?", "Its document's commands and its agents run on this machine, outside the sandbox, as the server's user.", { ok: "Run on the host", danger: true })) return;
-      await save({ sandbox: sb.checked, memory: mem.value.trim() || null, cpus: cpus.value.trim() || null,
-        pids: pids.value.trim() ? Number(pids.value) : null, tmp_size: tmp.value.trim() || null, parallel: par.checked,
-        allow: hosts.value.split(/[\n,]/).map(x => x.trim()).filter(Boolean) });
-    }, { cls: "primary" }))]);
+    h("div", { class: "form-actions" }, h("span", { class: "muted small" }, saveLabel === "Save" ? "Changes save as you make them." : "Kept for the new loop as you make them."), mark)]);
 }
 
 async function loopPage(name, owner, path = "") {
@@ -1114,7 +1185,10 @@ async function loopPage(name, owner, path = "") {
     return h("label", { class: "check small ignored-toggle", title: "Files the loop's .gitignore ignores; .git is never shown" }, box, "show ignored files");
   }
   function fileList(list) {
-    return h("ul", { class: "files" }, list.map(f => h("li", { class: f.ignored ? "ignored" : "" },
+    // D829: a loop's own parts stand out: its documents and the folders Flux keeps
+    const own = (f) => !f.path.includes("/") && (f.dir ? ["out", "runs", "workbench", "library"].includes(f.path)
+      : f.path === "problem.yaml" || f.path.endsWith(".problem.yaml"));
+    return h("ul", { class: "files" }, list.map(f => h("li", { class: (f.ignored ? "ignored" : "") + (own(f) ? " own" : "") },
       h("a", { href: "javascript:void 0", onclick: () => openFile(f.path, f.dir) }, h("span", { class: "ic" }, f.dir ? "▸" : "·"), f.path.split("/").pop() + (f.dir ? "/" : "")),
       f.ignored ? h("span", { class: "pill small" }, "ignored") : "", f.dir ? "" : h("small", { class: "muted" }, size(f.size)))));
   }
@@ -1436,7 +1510,7 @@ async function loopPage(name, owner, path = "") {
         await api(`/apps/${enc(name)}`, { method: "DELETE" }); toast(`${name} deleted`, "ok"); location.hash = "#/";
       }, { cls: "danger" }))], { cls: "danger-card" }) : "";
     body.replaceChildren(varsCard, await sharingCard(name, isOwner), advancedCard(e, async (adv) => {
-      await api(`/apps/${enc(name)}/advanced${qs}`, { method: "PUT", body: adv }); toast("Advanced settings saved: they apply from the next start", "ok"); settingsView();
+      await api(`/apps/${enc(name)}/advanced${qs}`, { method: "PUT", body: adv });      // D833: quiet, as it changes
     }), danger);
   }
   /** A pass's conclusion as lines (D701: it is a record, not text): each field on its own line,
@@ -1672,6 +1746,9 @@ async function loopPage(name, owner, path = "") {
 
 /** The log: follow, wrap, a filter (text or /regex/), problems only, download; the loop's starts to
     pick one from (D692). */
+/** D816: a log line's stamp with its day -- "Oct 05 14:03:22" -- so a run of several days reads. */
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const logAt = (at) => `${MONTHS[Number(at.slice(5, 7)) - 1] || at.slice(5, 7)} ${at.slice(8, 10)} ${at.slice(11, 19)}`;
 function logView(base, qs) {
   const lines = []; let partial = "", seen = 0;
   const listeners = [];                                   // D697: the Live tab's log follows the same stream
@@ -1696,7 +1773,7 @@ function logView(base, qs) {
   const MARK = /^── started (.+?) ──$/;
   const STAMP = /^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\.\d{3} /;   // flux_web.stamp.STAMP_RE (D732)
   const times = h("input", { type: "checkbox" });
-  try { times.checked = localStorage.getItem("flux-log-times") === "on"; } catch (_) { /* per browser, when it can */ }
+  try { times.checked = localStorage.getItem("flux-log-times") !== "off"; } catch (_) { times.checked = true; }   // D816: on unless turned off
   const timeListeners = [];
   times.addEventListener("change", () => {
     try { localStorage.setItem("flux-log-times", times.checked ? "on" : "off"); } catch (_) { /* per browser */ }
@@ -1721,7 +1798,7 @@ function logView(base, qs) {
   function lineEl(l) {
     const cls = MARK.test(l.text) ? "marker" : PROBLEM.test(l.text) ? "bad" : WARN.test(l.text) ? "warn" : GOOD.test(l.text) ? "good" : "";
     return h("div", { class: "ln " + cls, "data-n": String(l.n) }, h("span", { class: "no" }, String(l.n)),
-      times.checked ? h("span", { class: "at", title: l.at || "written before times were kept" }, l.at ? l.at.slice(11) : "") : "",
+      times.checked ? h("span", { class: "at", title: l.at || "written before times were kept" }, l.at ? logAt(l.at) : "") : "",
       h("span", { class: "tx" }, l.text || " "));
   }
   function drawStarts() {
@@ -2346,10 +2423,15 @@ function filesPanel(name, yamlOf) {
     catch (x) { toast(pd.signal.aborted ? `The upload was cancelled: ${x.message}.` : `The upload failed: ${x.message}`, pd.signal.aborted ? "warn" : "bad", { timeout: 12000 }); }
     finally { pd.close(); draw(); }
   });
+  // D828: folded under the form; open by itself when there are files, or the document names one it lacks
+  const count = h("span", { class: "muted small" });
+  const fold = h("details", { class: "card files-card files-fold" }, h("summary", {}, h("strong", {}, "Files that go with it"), count), box);
   async function draw() {
     const files = await list().catch(() => []);
     const have = new Set(files.map(f => f.path));
     const missing = named().filter(p => !have.has(p));
+    count.textContent = ` · ${files.length} file(s)` + (missing.length ? ` · ${missing.length} named and missing` : "");
+    if (files.length || missing.length) fold.open = true;
     box.replaceChildren(
       files.length ? h("ul", { class: "files flist" }, files.map(f => h("li", {},
         h("a", { href: "javascript:void 0", onclick: () => open(f) }, h("span", { class: "ic" }, "·"), f.path),
@@ -2362,7 +2444,7 @@ function filesPanel(name, yamlOf) {
   let t;
   const watch = () => { clearTimeout(t); t = setTimeout(draw, 600); };
   draw();
-  return { el: card("Files that go with it", box, { cls: "files-card" }), watch, draw,
+  return { el: fold, watch, draw,
     async upload(appName) {                                  // a new loop: its files, once it exists
       if (!staged.size) return 0;
       return sendFiles(appName, [...staged].map(([p, x]) => ({ file: x.file || new File([x.text], p.split("/").pop(), { type: "text/plain" }), path: p })));
@@ -2372,7 +2454,42 @@ function filesPanel(name, yamlOf) {
 /** Make or change a loop's problem, three ways (D704). New: the configurator, an upload, or an
     agent that writes it from a description and files. Existing: the configurator, the document
     and its files edited directly, or an agent that revises it as told. */
-const CONFIG_MODES = { configurator: "Configurator", upload: "Upload", edit: "Direct edit", agent: "Agent" };
+const CONFIG_MODES = { empty: "Empty loop", configurator: "Configurator", upload: "Upload", edit: "Direct edit", agent: "Agent", clone: "Clone a loop" };
+/** D824: a loop's problem cloned into a new loop of one's own. */
+async function cloneDialog(name, owner) {
+  const to = h("input", { value: `${name}-2`, class: "mono", id: "clone-to", autocomplete: "off" });
+  const wb = h("input", { type: "checkbox", id: "clone-wb" });
+  const go = await dialog(`Clone ${owner && owner !== me.name ? owner + "'s " : ""}${name}`, h("div", { class: "stack" },
+    h("label", { class: "stack" }, "The new loop's name", to),
+    h("label", { class: "check" }, wb, "with its workbench (the agents' notes and tools)"),
+    h("p", { class: "muted small" }, "It gets the problem: its documents, the files they name, library/, its sub-loops. Not its runs: out/ (the record, the decision) and runs/ (the log, notes, questions) start empty.")),
+    [["Cancel", null], ["Clone", () => ({ to: to.value.trim(), workbench: wb.checked }), "primary"]]);
+  if (!go || !go.to) return;
+  const got = await api(`/apps/${enc(name)}/clone${owner ? `?owner=${enc(owner)}` : ""}`, { method: "POST", body: go });
+  toast(`${got.name}: cloned`, "ok");
+  location.hash = `#/app/${enc(got.name)}`;
+}
+/** D825: a loop's baseline -- the skeleton problem.yaml, the README of its parts, library/ -- then its configurator. */
+function emptyForm(body) {
+  const name = h("input", { id: "empty-name", placeholder: "my_loop", class: "mono", autocomplete: "off" });
+  body.replaceChildren(card(null, [h("p", { class: "muted" }, "A loop's folder as it starts: problem.yaml with every part present and what goes there, ",
+      "a README of what each part of the folder is for, an empty library/. Nothing of any case: you fill it in, in the configurator or directly."),
+    h("label", { class: "stack" }, "Its name", name),
+    h("div", { class: "form-actions" }, act("Make the empty loop", async () => {
+      const got = await api("/apps/new-empty", { method: "POST", body: { name: name.value.trim() } });
+      toast(`${got.name}: fill in its problem`, "ok");
+      location.hash = `#/app/${enc(got.name)}/settings/problem`;
+    }, { cls: "primary" }))]));
+}
+async function cloneForm(body) {
+  const loops = await api("/loops");
+  const pick = h("select", { id: "clone-from", "aria-label": "The loop to clone" },
+    loops.map(l => { const o = l.owner && l.owner !== me.name ? l.owner : ""; return h("option", { value: JSON.stringify([o, l.name || l.app]) }, `${o ? o + " / " : ""}${l.name || l.app}`); }));
+  body.replaceChildren(card(null, loops.length ? [h("p", { class: "muted" }, "A loop you have, or one shared with you, as the start of a new one: its problem -- documents, files, library/, sub-loops -- without its runs."),
+    h("label", { class: "stack" }, "Clone", pick),
+    h("div", { class: "form-actions" }, act("Clone…", () => { const [o, n] = JSON.parse(pick.value); return cloneDialog(n, o || null); }, { cls: "primary" }))]
+    : empty("No loop to clone yet.")));
+}
 async function configurePage(name, owner, mode = "configurator") {
   const show = pageShow();
   const isNew = !name;
@@ -2388,7 +2505,7 @@ async function configurePage(name, owner, mode = "configurator") {
     loop's Settings › Problem (D713). `base`: the address the modes extend. */
 function configureInto(host, name, owner, mode, base, { small = false, barHost = null } = {}) {
   const isNew = !name;
-  const modes = isNew ? ["configurator", "upload", "agent"] : ["configurator", "edit", "agent"];
+  const modes = isNew ? ["empty", "configurator", "upload", "agent", "clone"] : ["configurator", "edit", "agent"];
   if (!modes.includes(mode)) mode = "configurator";
   const body = h("div", {}), tabBar = h("div", { class: small ? "subtabs" : "tabs", role: "tablist" });
   function drawTabs() {
@@ -2401,6 +2518,8 @@ function configureInto(host, name, owner, mode, base, { small = false, barHost =
       if (mode === "configurator") await crafterView(body, name, owner);
       else if (mode === "upload") body.replaceChildren(uploadForm());
       else if (mode === "edit") await directEdit(body, name);
+      else if (mode === "clone") await cloneForm(body);
+      else if (mode === "empty") emptyForm(body);
       else await (isNew ? newByAgent(body) : reviseByAgent(body, name, owner));
     } catch (x) { body.replaceChildren(card(null, h("p", { class: "err" }, x.message))); }
   }
@@ -2448,7 +2567,7 @@ async function crafterView(body, name, owner) {
   const panel = filesPanel(null, yamlOf);
   let adv = null;                                           // D697: an admin's advanced settings, applied once it exists
   const advBox = me.role === "admin" ? advancedCard({ advanced: {}, advanced_said: { memory: "memory", cpus: "CPUs", pids: "processes", tmp_size: "scratch" },
-    can_advance: true, sandboxed_server: true }, async (a) => { adv = a; toast("Kept: applied when the loop is created", "ok"); }, "Keep for the new loop") : "";
+    can_advance: true, sandboxed_server: true }, async (a) => { adv = a; }, "Keep for the new loop") : "";
   body.replaceChildren(host, panel.el, advBox);
   host.addEventListener("input", panel.watch); host.addEventListener("change", panel.watch);
   setTimeout(panel.draw, 300);
@@ -2569,7 +2688,7 @@ async function reviseByAgent(body, name, owner) {
 // ================================================================ admin and account
 /** The admin's pages (D695): every loop and the controls over all of them, what the machine
     holds up (containers, disk, caches), users with their limits and usage, the audit trail. */
-const ADMIN_TABS = { "": "Loops", insights: "Insights", applications: "Applications", documents: "Documents", resources: "Resources", sandbox: "Sandbox", agents: "Agents and models", users: "Users", audit: "Audit" };
+const ADMIN_TABS = { "": "Loops", insights: "Insights and audit", applications: "Applications", resources: "Resources", sandbox: "Sandbox", agents: "Agents and models", users: "Users" };
 const bytes = (n) => n == null ? "" : n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(0)} KB` : n < 1073741824 ? `${(n / 1048576).toFixed(1)} MB` : `${(n / 1073741824).toFixed(2)} GB`;
 function meter(frac, cls = "") {
   const f = Math.max(0, Math.min(1, frac || 0));
@@ -2577,7 +2696,8 @@ function meter(frac, cls = "") {
 }
 async function adminPage(sub = "") {
   const show = pageShow();
-  const tab = sub === "models" ? "agents" : ADMIN_TABS[sub] ? sub : "";       // D814: Models and variables are the agents' tab
+  // D814: Models and variables are the agents' tab; D816: the audit is Insights', the documents are the Loops'
+  const tab = sub === "models" ? "agents" : sub === "audit" ? "insights" : ADMIN_TABS[sub] ? sub : "";
   const tabBar = h("div", { class: "tabs", role: "tablist" }, Object.entries(ADMIN_TABS).map(([k, label]) =>
     h("a", { role: "tab", class: k === tab ? "on" : "", href: `#/admin${k ? "/" + k : ""}` }, label)));
   const body = h("div", {});
@@ -2588,9 +2708,27 @@ async function adminPage(sub = "") {
   if (tab === "users") return adminUsers(body);
   if (tab === "sandbox") return adminSandbox(body);
   if (tab === "agents") return adminAgents(body);
-  if (tab === "insights") return adminInsights(body);
+  if (tab === "insights") {
+    // D819: a sub-tab each, a box or two that go together, so nothing scrolls far; the last looked at kept
+    const PARTS = [["failures", "Failures"], ["usage", "Usage and disk"], ["endpoints", "Endpoints and network"], ["audit", "Audit trail"]];
+    let cur = sub === "audit" ? "audit" : (() => { try { return localStorage.getItem("flux-insights-part"); } catch (_) { return null; } })();
+    if (!PARTS.some(([k]) => k === cur)) cur = "failures";
+    const bar = h("div", { class: "subtabs", role: "tablist" }), part = h("div", { id: "insights-part" });
+    const draw = async () => {
+      bar.replaceChildren(...PARTS.map(([k, label]) => h("button", { type: "button", role: "tab", class: k === cur ? "on" : "", "aria-selected": k === cur ? "true" : "false",
+        onclick: () => { cur = k; try { localStorage.setItem("flux-insights-part", k); } catch (_) { /* per viewer */ } draw(); } }, label)));
+      part.replaceChildren(skeleton(6));
+      if (cur === "audit") await adminAudit(part); else await adminInsights(part, cur);
+    };
+    body.replaceChildren(bar, part);
+    await draw();
+    return;
+  }
   if (tab === "applications") return adminApplications(body);
-  if (tab === "documents") return adminDocuments(body);
+}
+
+/** The audit trail (D708, D723), under Insights (D816): what happened, by whom, narrowed by both. */
+async function adminAudit(body) {
   const audit = await api("/audit");
   // D708: the hosts a loop's sandbox refused are here too, once per host and run.
   // D723: narrowed by what happened and by whom, each a list of what the trail holds
@@ -2631,12 +2769,16 @@ async function adminPage(sub = "") {
       h("td", { class: "mono muted" }, x.detail))) : [h("tr", {}, h("td", { colspan: 4 }, empty("Nothing matches.")))]));
   };
   what.onchange = who.onchange = draw; find.oninput = draw; draw();
-  body.replaceChildren(card(null, [h("div", { class: "toolbar" }, what, who, find, count),
+  body.replaceChildren(card("The audit trail", [h("div", { class: "toolbar" }, what, who, find, count),
     h("table", { class: "list" }, h("thead", {}, h("tr", {}, h("th", {}, "When"), h("th", {}, "Who"), h("th", {}, "What"), h("th", {}, "Detail"))), rows)]));
 }
 
 async function adminLoops(body) {
   const [allApps, res] = await Promise.all([api("/admin/apps"), api("/admin/resources").catch(() => null)]);
+  // D816: the documents of an earlier form, looked for when asked (each loop's documents are tried)
+  const migration = h("div", {});
+  const migrateBtn = act("Migrate documents of an earlier form…", async () => { migrateBtn.hidden = true; await adminDocuments(migration); },
+    { cls: "small", title: "Each loop's documents, what would change to be of today's form, and the migration" });
   const paused = res ? res.paused : null;
   const running = allApps.filter(l => l.running).length;
   const reason = h("input", { placeholder: "why (users see it)", style: "min-width:260px" });
@@ -2657,7 +2799,7 @@ async function adminLoops(body) {
         const r = await api("/admin/stop-all", { method: "POST", body: { now: true } }); toast(`${Object.keys(r.stopped).length} loop(s) stopping`, "ok"); route();
       }, { cls: "danger" }))]);
   const box = h("div", {}, loopsBrowser(allApps, { who: true }));
-  body.replaceChildren(controls, card("Every loop", box));
+  body.replaceChildren(controls, card("Every loop", box, { actions: [migrateBtn] }), migration);
   pageRefresh = async () => { if (!box.contains(document.activeElement)) box.replaceChildren(loopsBrowser(await api("/admin/apps"), { who: true })); };
 }
 
@@ -2885,6 +3027,7 @@ async function adminSandbox(body) {
     h("label", { class: "check" }, usersAdd, "a user may add hosts when starting a loop"));
   const showAllow = () => { allowBox.hidden = mode.value !== "allowlist"; };
   mode.addEventListener("change", showAllow); showAllow();
+  const sbMark = saveMark();
   body.replaceChildren(
     r.sandboxed ? "" : h("p", { class: "callout bad" }, "This server runs without the sandbox (--no-sandbox): none of this applies."),
     card("Network", [h("p", { class: "muted" }, "What the containers may reach. With an allowlist they have no network of their own: a proxy on this machine forwards to the allowed hosts and refuses the rest, a name resolved and checked against the IPs and CIDRs. A loop's Settings may add hosts for that loop; a loop an admin runs on the host has the machine's network."),
@@ -2896,19 +3039,18 @@ async function adminSandbox(body) {
     card("Homes", [h("p", { class: "muted" }, "Every user has a home of their own: their runs' HOME, writable and kept -- their agents' settings, logins and sessions. ",
         "Each user logs their agents in on their Account page; no one's login is shared."),
       h("label", { class: "stack" }, `Every home starts with (paths inside ${r.home}, copied where a home lacks them, never over what is there)`, seed)]),
-    h("div", { class: "form-actions" }, act("Save", async () => {
-      await api("/admin/sandbox", { method: "PUT", body: { network: mode.value, allow: list(allow), users_add: usersAdd.checked, endpoints: endpoints.checked,
-        path: list(paths), login_path: loginP.checked, home_seed: list(seed) } });
-      toast("Sandbox settings saved: they apply from each loop's next start", "ok"); route();
-    }, { cls: "primary" })));
+    h("div", { class: "form-actions" }, h("span", { class: "muted small" }, "Changes save as you make them; they apply from each loop's next start."), sbMark));
+  // D833: saved as they change
+  autosave([mode, allow, usersAdd, endpoints, paths, loginP, seed], () => api("/admin/sandbox", { method: "PUT", body: { network: mode.value,
+    allow: list(allow), users_add: usersAdd.checked, endpoints: endpoints.checked, path: list(paths), login_path: loginP.checked, home_seed: list(seed) } }), sbMark);
 }
 
 /** Admin › Insights (D766): what went wrong, what was used, how the endpoints and agents did,
     what the network refused, where the disk goes -- over the last days. */
-async function adminInsights(body) {
+async function adminInsights(body, part = "failures") {   // D819: one part of them: failures, usage, endpoints
   let days = 7;
   try { days = Number(localStorage.getItem("flux-insights-days")) || 7; } catch (_) {}
-  const pick = h("select", { "aria-label": "Over the last", onchange: () => { try { localStorage.setItem("flux-insights-days", pick.value); } catch (_) {} adminInsights(body); } },
+  const pick = h("select", { "aria-label": "Over the last", onchange: () => { try { localStorage.setItem("flux-insights-days", pick.value); } catch (_) {} adminInsights(body, part); } },
     [[1, "day"], [7, "7 days"], [30, "30 days"]].map(([v, t]) => h("option", { value: v, selected: v === days }, t)));
   body.replaceChildren(skeleton(8));
   const r = await api(`/admin/insights?days=${days}`);
@@ -2961,7 +3103,8 @@ async function adminInsights(body) {
     h("tbody", {}, r.disk.map(d => h("tr", {}, h("td", { class: "strong" }, d.user), h("td", { class: "num mono" }, bytes(d.home)),
       h("td", { class: "num mono" }, `${bytes(d.loops)} (${d.count})`), h("td", {}, d.largest ? [loopLink(d.user, d.largest.app), " ", h("span", { class: "muted mono small" }, bytes(d.largest.size))] : "—"),
       h("td", { class: "num mono strong" }, bytes(d.total)), h("td", { class: "meter-cell" }, meter(d.total / maxDisk)))))));
-  body.replaceChildren(h("div", { class: "toolbar" }, h("span", { class: "muted" }, "Over the last"), pick), failCard, usageCard, epCard, netCard, diskCard);
+  const parts = { failures: [failCard], usage: [usageCard, diskCard], endpoints: [epCard, netCard] };
+  body.replaceChildren(h("div", { class: "toolbar" }, h("span", { class: "muted" }, "Over the last"), pick), ...(parts[part] || parts.failures));
 }
 
 /** Admin › Agents and models (D756, D807, D814): one tab per tool -- Flux's own model and the agent by
@@ -2984,40 +3127,44 @@ async function adminAgents(body) {
     const creds = h("textarea", { id: `ag-${a.id}-creds`, rows: 1, class: "mono", placeholder: "its usual; e.g. .local/share/nga/auth.json", value: lines(a.login_files) });
     const ready = a.users.filter(u => u.state === "ready").map(u => u.user), failed = a.users.filter(u => u.state === "failed").map(u => u.user);
     const body_ = () => ({ label: label.value, bin: bin.value, login: login.value, args: args.value, home: list(home), hosts: list(hosts), login_files: list(creds) });
-    const first = JSON.stringify(body_());
-    const el = h("div", { class: "agent-panel" },
-      h("h2", { class: "agent-panel-name" }, a.label),
+    let first = JSON.stringify(body_());
+    const mark = saveMark();
+    const put = async () => { if (JSON.stringify(body_()) === first) return; await api(`/admin/agents/${a.id}`, { method: "PUT", body: body_() }); first = JSON.stringify(body_()); };
+    autosave([login, args, home, hosts, creds], put, mark);                       // D833
+    autosave([label, bin], async () => { const was = first; await put(); if (was !== first) route(); }, mark, { typing: false });
+    const el = h("div", { class: "agent-panel", "data-agent": a.id, "data-label": a.label },
       h("div", { class: "agent-found" },
         h("span", { class: `pill ${a.found ? "ok" : "bad"}` }, a.found ? "found" : "not found"),
         h("span", { class: "pill" }, a.builtin ? "built in" : `a ${a.kind}`), h("code", { class: "small" }, a.id),
-        h("span", { class: "mono small" }, a.found ? `${a.found}${a.version ? " · " + a.version : ""}`
+        mark, h("span", { class: "mono small" }, a.found ? `${a.found}${a.version ? " · " + a.version : ""}`
           : a.builtin ? `${a.bin || a.id} is not on the runs' PATH: not offered to users` : `${a.bin ? a.bin + " is not there or not runnable" : "no program yet"}: not offered to users`)),
-      h("h4", { class: "set-sub" }, "Its program and login"),
       h("div", { class: "grid-2" },
-        h("label", { class: "stack" }, "Name shown", label),
         h("label", { class: "stack" }, a.builtin ? "Program (a path, or a name on PATH)" : "Program (a path)", bin),
-        h("label", { class: "stack" }, "Login command", login),
-        h("label", { class: "stack" }, "Extra arguments, every run", args),
-        h("label", { class: "stack", title: "Where a login of this build is kept, in a user's home: what says they are logged in" }, "Login files (when not its usual)", creds),
-        h("label", { class: "stack" }, "Every home starts with (paths in this server account's home)", home),
-        h("label", { class: "stack" }, "Hosts it needs, under a network allowlist", hosts)),
-      h("p", { class: "small" }, h("strong", {}, "Ready for: "), ready.length ? ready.join(", ") : "nobody yet",
-        failed.length ? h("span", { class: "bad" }, ` · its test failed for ${failed.join(", ")}`) : "",
-        h("span", { class: "muted" }, " (each user tests it on their Account page; it is tested again each day)")),
+        h("label", { class: "stack" }, "Name shown", label)),
+      // D816: what is set once and rarely looked at again, folded
+      h("details", { class: "agent-more" }, h("summary", { class: "small" }, "Login, arguments, home files, hosts",
+          [a.login, a.args, ...a.login_files, ...a.home, ...a.hosts].some(Boolean) ? h("span", { class: "set-dot" }, " •") : ""),
+        h("div", { class: "grid-2" },
+          h("label", { class: "stack" }, "Login command", login),
+          h("label", { class: "stack" }, "Extra arguments, every run", args),
+          h("label", { class: "stack", title: "Where a login of this build is kept, in a user's home: what says they are logged in" }, "Login files (when not its usual)", creds),
+          h("label", { class: "stack" }, "Every home starts with (paths in this server account's home)", home),
+          h("label", { class: "stack" }, "Hosts it needs, under a network allowlist", hosts))),
+      h("p", { class: "small muted" }, "Ready for ", ready.length ? h("strong", {}, ready.join(", ")) : "nobody yet",
+        failed.length ? h("span", { class: "bad" }, ` · its test failed for ${failed.join(", ")}`) : "", "."),
       a.builtin ? "" : h("div", { class: "form-actions" }, act("Remove", async () => {
         if (!await confirmDialog(`Remove ${a.label}?`, "Its settings and variables go with it, the server's and every user's; a loop that names it no longer starts.", { ok: "Remove", danger: true })) return;
         await api(`/admin/agents/${a.id}`, { method: "DELETE" }); toast(`${a.label} removed`, "ok"); route();
       }, { cls: "danger small" })));
-    return { el, dirty: () => JSON.stringify(body_()) !== first,
-             save: async () => { await api(`/admin/agents/${a.id}`, { method: "PUT", body: body_() }); toast(`${label.value || a.label} saved: from the next start, login and test`, "ok"); } };
+    return { el };
   };
   const offered = new Set(st.groups.filter(g => g.agent).map(g => g.agent));
   const panels = {}, extraTabs = [];
   for (const a of r.agents) {
     const p = panelOf(a);
     if (offered.has(a.id)) panels[a.id] = p;
-    else extraTabs.push({ tab: a.label, before: "other", el: h("fieldset", { class: "set-group with-panel" }, h("legend", {}, a.label), p.el,
-      h("p", { class: "muted small" }, "Its model and its own variables are set here once its program is found.")), save: p.save, dirty: p.dirty });
+    else extraTabs.push({ tab: a.label, noSave: true, el: h("fieldset", { class: "set-group with-panel" }, h("legend", {}, a.label), p.el,
+      h("p", { class: "muted small" }, "Its model and its own variables are set here once its program is found.")) });
   }
   extraTabs.push({ tab: "Every agent", noSave: true, el: h("fieldset", { class: "set-group" }, h("legend", {}, "Variables for every run and every agent"),
     h("p", { class: "muted small" }, "Every run on this server gets these, and each of its agents whatever the name (an ANTHROPIC_API_KEY here reaches Claude Code and OpenCode alike); a user's and a loop's own come over them. The sandbox's own variables cannot be set here: a loop's Settings tab has them."),
@@ -3036,16 +3183,15 @@ async function adminAgents(body) {
       try { localStorage.setItem("flux-models-tab-server", nlabel.value.trim() || name.value.trim()); } catch (_) { /* per viewer */ }
       toast(`${name.value.trim()} added`, "ok"); route();
     }, { cls: "primary" }))) });
-  const save = async (values) => { if (Object.keys(values).length) await api("/admin/settings", { method: "PUT", body: { values } }); toast("Saved", "ok"); route(); };
-  body.replaceChildren(card("Agents and models", [h("p", { class: "muted" }, "Each tool on a tab of its own: an agent's program and login, then the model it uses and the variables only it gets; ",
-      "Flux's own model; the variables every agent gets. What the server sets, every run gets unless its user sets their own on their Account page. Keys are stored encrypted and never shown again."),
+  const save = async (values) => { if (Object.keys(values).length) await api("/admin/settings", { method: "PUT", body: { values } }); };   // D833: quiet, field by field
+  body.replaceChildren(card("Agents and models", [h("p", { class: "muted small" }, "What the server sets, every run gets unless its user sets their own. Keys are stored encrypted and never shown again."),
     ...settingsForm(st, { save, scope: "server", panels, extraTabs, agentEnv: (a) => ({ rows: (st.agent_env || {})[a] || [],
       save: async (v) => { await api(`/admin/agents/${a}/env`, { method: "PUT", body: v }); route(); } }) })]));
 }
 
 async function adminUsers(body) {
   const [users, use, res] = await Promise.all([api("/users"), api("/admin/usage").catch(() => []), api("/admin/resources").catch(() => null)]);
-  const name = h("input", { placeholder: "name" }); const pw = h("input", { type: "password", placeholder: "password (10+)" });
+  const name = h("input", { placeholder: "name", autocomplete: "off", "data-lpignore": "true" }); const pw = h("input", { type: "password", autocomplete: "new-password", placeholder: "password (empty: send an invitation link)", style: "min-width:280px" });
   // D734: the kinds -- internal users' runs inherit the server's settings, external ones bring their own
   const KINDS = [["internal", "internal"], ["external", "external"], ["admin", "admin"]];
   const kindSel = (value, onchange, label) => h("select", { "aria-label": label, onchange }, KINDS.map(([v, t]) => h("option", { value: v, selected: v === value }, t)));
@@ -3054,18 +3200,17 @@ async function adminUsers(body) {
   const def = res ? res.max_running : 4;
   const limitCell = (u) => {
     const cur = res && res.limits ? res.limits[u.name] : null;
-    const inp = h("input", { type: "number", min: 0, max: 64, value: cur ?? "", placeholder: String(def), style: "width:64px" });
-    return h("td", {}, h("span", { class: "inline" }, inp, act("Set", async () => {
-      const v = inp.value.trim() === "" ? null : Number(inp.value);
-      await api(`/admin/users/${enc(u.name)}/limit`, { method: "PUT", body: { max_running: v } });
-      toast(`${u.name}: ${v == null ? `the default (${def})` : v} loop(s) at once`, "ok");
-    }, { cls: "small" })));
+    const inp = h("input", { type: "number", min: 0, max: 64, value: cur ?? "", placeholder: String(def), style: "width:64px", "aria-label": `${u.name}'s running limit` });
+    const mark = saveMark();
+    autosave(inp, () => api(`/admin/users/${enc(u.name)}/limit`, { method: "PUT", body: { max_running: inp.value.trim() === "" ? null : Number(inp.value) } }), mark);   // D833
+    return h("td", {}, h("span", { class: "inline" }, inp, mark));
   };
   body.replaceChildren(card("Users", [h("div", { class: "scroll-x" }, h("table", { class: "list" },
       h("thead", {}, h("tr", {}, h("th", {}, "User"), h("th", {}, "Role"), h("th", { title: "Loops running at once; empty: the server's default" }, "Running limit"),
         h("th", { class: "num" }, "Loops"), h("th", { class: "num" }, "Turns"), h("th", { class: "num" }, "Time"), h("th", { class: "num" }, "Tokens in → out"), h("th", { class: "num" }, "Cost"), h("th", {}, ""))),
       h("tbody", {}, users.map(u => { const x = useOf(u.name); return h("tr", {},
-        h("td", { class: "strong" }, u.name), h("td", {}, u.name === me.name ? h("span", { class: "pill" }, u.role)
+        h("td", { class: "strong" }, u.name, u.pending ? h("span", { class: "pill live small", title: "Invited: their password is not set yet" }, "invited") : ""),
+        h("td", {}, u.name === me.name ? h("span", { class: "pill" }, u.role)
           : kindSel(u.role, async (e) => {
               const to = e.target.value;
               try { await api(`/users/${enc(u.name)}`, { method: "PATCH", body: { role: to } }); toast(`${u.name} is ${to} now`, "ok"); }
@@ -3079,15 +3224,16 @@ async function adminUsers(body) {
             if (!u.disabled && !await confirmDialog(`Disable ${u.name}?`, "They are logged out and cannot log in; their loops stay.", { ok: "Disable", danger: true })) return;
             await api(`/users/${enc(u.name)}`, { method: "PATCH", body: { disabled: !u.disabled } }); toast(`${u.name} ${u.disabled ? "enabled" : "disabled"}`, "ok"); route();
           }, { cls: "small" }),
-          act("Reset password", async () => {
-            const p = await promptDialog(`New password for ${u.name}`, "At least 10 characters", { type: "password", min: 10 });
-            if (p === null) return;
-            await api(`/users/${enc(u.name)}`, { method: "PATCH", body: { password: p } }); toast(`${u.name}'s password changed`, "ok");
-          }, { cls: "small" })))); })))),
+          act(u.pending ? "New invitation link" : "Password reset link", async () => {
+            const got = await api(`/users/${enc(u.name)}/link`, { method: "POST" });
+            await linkDialog(u.name, got.token, got.kind);
+          }, { cls: "small", title: "A one-time link to choose a password (D818); an earlier link stops working" })))); })))),
     h("div", { class: "row add-user" }, name, pw, newKind,
       act("Add user", async () => {
-        await api("/users", { method: "POST", body: { name: name.value, password: pw.value, role: newKind.value } });
-        toast(`${name.value} added`, "ok"); route();
+        const got = await api("/users", { method: "POST", body: { name: name.value, password: pw.value || null, role: newKind.value } });
+        if (got.token) await linkDialog(got.ok, got.token, got.kind);           // D818: an invitation to send
+        else toast(`${name.value} added`, "ok");
+        route();
       }, { cls: "primary" })),
     h("p", { class: "muted small" }, "Internal: their runs use the server's model, agent and environment settings. External: they set their own on their Account page, ",
       "and log their agents in there, into a home of their own. The network rules apply to everyone.")]));
@@ -3096,24 +3242,42 @@ async function adminUsers(body) {
 /** Model settings by what uses them (D696): Flux's own model and each coding agent. `server`:
     the admin's values a field falls back to when empty (a key only said to be set). */
 const SETTING_LABELS = { FLUX_REMOTE_BASE_URL: "Endpoint URL", FLUX_REMOTE_MODEL: "Model", FLUX_LLM_TIMEOUT_S: "Seconds per request",
-  FLUX_LLM_MODEL: "Local model (Ollama tag)", OLLAMA_BASE_URL: "Ollama URL", FLUX_REMOTE_API_KEY: "Key", OPENROUTER_API_KEY: "OpenRouter key",
+  FLUX_REMOTE_API_KEY: "Key",
   FLUX_DEFAULT_AGENT: "Agent" };
 /** D807: each agent offered has a tab of its own -- its kind's endpoint, model and key, and variables
     for it alone (`agentEnv(name)`: its rows and how to save one, or null). */
 function settingsForm(st, { server = null, save, scope, agentEnv = null, panels = {}, extraTabs = [] }) {
   // D814: `panels[agent]` -- {el, save, dirty} -- its program and login above its model; `extraTabs` --
-  // [{tab, el, before, save, dirty, noSave}] -- a tab of its own (an agent not offered, every agent's
+  // [{tab, el, save, dirty, noSave}] -- a tab of its own (an agent not offered, every agent's
   // variables, adding one); one Save writes what changed on any tab
   const inputs = {};
   const secret = new Set(st.secret);
   const labels = Object.assign({}, SETTING_LABELS, ...st.groups.map(g => g.labels || {}));
   const row = (k) => {
-    const cur = st.values[k], fall = server ? server[k] : null, sec = secret.has(k);
-    inputs[k] = h("input", { type: sec ? "password" : "text", autocomplete: "off", value: sec ? "" : (cur || ""),
-      placeholder: sec ? (cur ? "set · type to replace" : fall ? "the server's key" : "not set") : (fall ? `the server's: ${fall}` : "not set") });
+    const fall = server ? server[k] : null, sec = secret.has(k);
+    const holder = (cur) => sec ? (cur ? "set · type to replace" : fall ? "the server's key" : "not set") : (fall ? `the server's: ${fall}` : "not set");
+    // D820: a key is a secret of the server's, not a login: no password manager fills it, nor the field before it
+    inputs[k] = h("input", { type: sec ? "password" : "text", autocomplete: sec ? "new-password" : "off", name: `flux-setting-${k}`,
+      "data-lpignore": "true", "data-1p-ignore": "true", "data-form-type": "other", value: sec ? "" : (st.values[k] || ""),
+      placeholder: holder(st.values[k]) });
+    const mark = saveMark(), clearBox = h("span", {});
+    const drawClear = () => clearBox.replaceChildren(st.values[k] ? act("Clear", async () => {
+      await save({ [k]: null }); st.values[k] = ""; inputs[k].value = ""; inputs[k].placeholder = holder(""); drawClear();
+      mark.className = "save-mark small ok"; mark.textContent = "cleared";
+    }, { cls: "small" }) : "");
+    drawClear();
+    // D833: saved as it changes; a key once typed and left (never shown back)
+    autosave(inputs[k], async () => {
+      const v = inputs[k].value.trim();
+      if (sec && !v) return;                                      // an empty key field changes nothing
+      if (!sec && v === (st.values[k] || "")) return;
+      await save({ [k]: v || null });
+      st.values[k] = sec ? "set" : v;
+      if (sec) { inputs[k].value = ""; inputs[k].placeholder = holder("set"); }
+      drawClear();
+    }, mark, { typing: !sec });
     return h("div", { class: "set-row" }, h("label", { class: "lbl", for: `set-${scope}-${k}` }, labels[k] || k),
-      h("span", { class: "inline" }, Object.assign(inputs[k], { id: `set-${scope}-${k}` }),
-        cur ? act("Clear", () => save({ [k]: null }), { cls: "small" }) : ""),
+      h("span", { class: "inline" }, Object.assign(inputs[k], { id: `set-${scope}-${k}` }), clearBox, mark),
       h("code", { class: "muted small var" }, k));
   };
   const groups = st.groups.map(g => {
@@ -3122,24 +3286,26 @@ function settingsForm(st, { server = null, save, scope, agentEnv = null, panels 
       : server && [...g.public, ...g.secret].some(k => server[k]) && !own ? "the server's settings apply" : "";
     const vars = g.agent && agentEnv ? agentEnv(g.agent) : null;
     const panel = g.agent ? panels[g.agent] : null;
+    // D823: an agent's model and its own variables fold away, open by themselves when something is set
+    const setHere = [...g.public, ...g.secret].filter(k => st.values[k] || (server && server[k])).length;
+    const fold = (title, n, open, ...kids) => h("details", { class: "set-fold" + (title.startsWith("Variables") ? " agent-vars" : ""), open: open || null },
+      h("summary", {}, title, n ? h("span", { class: "muted small" }, ` · ${n} set`) : h("span", { class: "muted small" }, " · none")), ...kids);
+    const rows = [g.hint ? h("p", { class: "muted small" }, g.hint) : "", note ? h("p", { class: "small hint-line" }, note) : "",
+      ...g.public.map(row), ...g.secret.map(row)];
+    const nVars = vars ? vars.rows.length + ((vars.server || []).length) : 0;
+    const varsEl = vars ? fold(`Variables for ${g.label} alone`, nVars, nVars > 0,
+      h("p", { class: "muted small" }, "Only this agent gets these (e.g. ANTHROPIC_API_KEY for an OpenCode); a variable for every agent goes on Every agent."),
+      envEditor(vars.rows, vars.save, `${scope}-${g.agent}`),
+      vars.server && vars.server.length ? h("div", {}, h("p", { class: "muted small" }, "The server's, under yours:"),
+        envTable(vars.server.map(x => ({ ...x, from: "the server" })), new Set(vars.rows.map(x => x.name)))) : "") : "";
     const el = h("fieldset", { class: "set-group" + (panel ? " with-panel" : "") }, h("legend", {}, g.label), panel ? panel.el : "",
-      panel ? h("h4", { class: "set-sub" }, "Its model") : "", g.hint ? h("p", { class: "muted small" }, g.hint) : "",
-      note ? h("p", { class: "small hint-line" }, note) : "",
-      ...g.public.map(row), ...g.secret.map(row),
-      // D807: variables for this agent alone (a variable for every agent is an ordinary one)
-      vars ? h("div", { class: "blk agent-vars" }, h("h4", {}, `Variables for ${g.label} alone`),
-        h("p", { class: "muted small" }, "Only this agent gets these (e.g. ANTHROPIC_API_KEY for an OpenCode); a variable for every agent goes with the environment variables."),
-        envEditor(vars.rows, vars.save, `${scope}-${g.agent}`),
-        vars.server && vars.server.length ? h("div", {}, h("p", { class: "muted small" }, "The server's, under yours:"),
-          envTable(vars.server.map(x => ({ ...x, from: "the server" })), new Set(vars.rows.map(x => x.name)))) : "") : "",
-      "");
+      g.agent ? fold("Its model: endpoint, model, key", setHere, setHere > 0, ...rows) : rows,
+      varsEl);
     return { g, el, own };
   });
   // D721: a tab per tool -- Flux, OpenCode, Claude Code, Codex, Other; one Save for all of them;
   // a tab that holds a value is marked; the tab last looked at is kept in this browser
-  const own = st.groups.filter(g => g.id !== "other").map(g => g.tab || g.label);
-  const tabs = [...new Set([...own, ...extraTabs.filter(x => x.before === "other").map(x => x.tab),
-    ...st.groups.filter(g => g.id === "other").map(g => g.tab || g.label), ...extraTabs.filter(x => x.before !== "other").map(x => x.tab)])];
+  const tabs = [...new Set([...st.groups.map(g => g.tab || g.label), ...extraTabs.map(x => x.tab)])];
   const extras = extraTabs.map(x => ({ ...x, holder: h("div", { class: "set-extra" }, x.el) }));
   const memo = `flux-models-tab-${scope}`;
   let cur = (() => { try { return localStorage.getItem(memo); } catch (_) { return null; } })();
@@ -3156,13 +3322,7 @@ function settingsForm(st, { server = null, save, scope, agentEnv = null, panels 
     for (const x of extras) x.holder.hidden = x.tab !== cur;
     actions.hidden = extras.some(x => x.tab === cur && x.noSave);
   };
-  const actions = h("div", { class: "form-actions" }, act("Save", async () => {
-    const values = {};
-    for (const k of st.public) if ((inputs[k].value || "") !== (st.values[k] || "")) values[k] = inputs[k].value || null;
-    for (const k of st.secret) if (inputs[k].value) values[k] = inputs[k].value;
-    for (const x of [...Object.values(panels), ...extras]) if (x.save && x.dirty && x.dirty()) await x.save();
-    return save(values);
-  }, { cls: "primary" }));
+  const actions = h("p", { class: "muted small autosave-said" }, "Changes save as you make them.");   // D833
   draw();
   return [bar, h("div", { class: "set-groups" }, groups.map(x => x.el), extras.map(x => x.holder)), actions];
 }
@@ -3170,7 +3330,7 @@ function settingsForm(st, { server = null, save, scope, agentEnv = null, panels 
 async function accountPage() {
   const show = pageShow();
   const [st, myEnv] = await Promise.all([api("/settings"), api("/env")]);
-  async function save(values) { await api("/settings", { method: "PUT", body: { values } }); toast("Settings saved", "ok"); route(); }
+  async function save(values) { await api("/settings", { method: "PUT", body: { values } }); }   // D833: quiet, field by field
   const pw = h("input", { type: "password", autocomplete: "new-password" });
   const mine = await api("/usage").catch(() => null);
   const holders = Object.fromEntries(st.groups.filter(g => g.agent).map(g => [g.agent, h("div", { class: "agent-login" })]));
@@ -3314,6 +3474,7 @@ async function route() {
   for (const d of document.querySelectorAll("dialog.dlg")) d.dispatchEvent(new Event("cancel"));   // a dialog belongs to its page
   const hash = location.hash || "#/";
   if (hash === "#/login") { drawNav(); return loginPage(); }
+  { const m = hash.match(/^#\/invite\/([A-Za-z0-9_-]+)$/); if (m) { drawNav(); return invitePage(m[1]); } }   // D818: before any login
   if (!me) { try { me = await api("/me"); pollLoops(); } catch (_) { return; } }
   drawNav();
   try {
