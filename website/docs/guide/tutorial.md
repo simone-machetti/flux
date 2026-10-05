@@ -1,10 +1,15 @@
+---
+hide:
+  - navigation
+---
+
 # Tutorial: a square root circuit
 
 Goal: a 16-bit integer square root in SystemVerilog, as fast and small as possible on ASAP7,
 written by an AI model and checked by Flux. About ten minutes of running.
 
 Before you start: the [full install](../index.md#get-started), and an AI model
-([choosing one](../demos/index.md#choosing-an-ai-model)). Run `flux selftest`: every line should
+([choosing one](run.md#choosing-an-ai-model)). Run `flux selftest`: every line should
 say PASS.
 
 ## 1. Start from a template
@@ -34,10 +39,10 @@ def golden(x: int) -> dict:
     return {"r": math.isqrt(x)}
 ```
 
-## 3. Say what you want: `isqrt/isqrt.problem.yaml`
+## 3. Say what you want: `isqrt/problem.yaml`
 
 ```yaml
-id: isqrt
+# the folder's name, isqrt, is the problem's id: the document does not say it
 statement: >-                     # the request, in words: the model reads it
   A combinational integer square root in SystemVerilog: module `isqrt`, input `x` (16 bits,
   unsigned), output `r` (8 bits), r = floor(sqrt(x)). As fast as possible on ASAP7, then as
@@ -46,22 +51,23 @@ contract: >-                      # rules every design must follow
   One module named exactly `isqrt`, purely combinational (no clock, no reset), ports
   `input logic [15:0] x` and `output logic [7:0] r`. r must equal floor(sqrt(x)) for every x.
 language: systemverilog
-gate: flux rtl test {artifact} --golden {home}/golden.py     # refuses a wrong design
-stages:                                                     # measurements, cheapest first
-  - name: screen                                            # Yosys synthesis: seconds
-    command: flux rtl measure {artifact} --stage synth --clock-ps 1000
-  - name: confirm                                           # OpenROAD placement: the quoted numbers
-    command: flux rtl measure {artifact} --stage place --clock-ps 1000
+
+flow:
+  test: flux rtl test {artifact} --golden {home}/golden.py     # refuses a wrong design
+  measure:                                                     # measurements, cheapest first
+    screen: flux rtl measure {artifact} --stage synth --clock-ps 1000  # Yosys synthesis: seconds
+    confirm: flux rtl measure {artifact} --stage place --clock-ps 1000  # OpenROAD placement: the quoted numbers
+  select: {finalists: 2}
 objectives:                       # reach 1000 MHz, then the smallest area
   - {metric: fmax_mhz, direction: maximize, goal: 1000}
   - {metric: area_um2, direction: minimize}
-budget: {steps: 3, repair_attempts: 6, finalists: 2}
+budget: {steps: 3, repair_attempts: 6}
 ```
 
 ## 4. Check it
 
 ```bash
-flux task check isqrt/isqrt.problem.yaml
+flux task check isqrt
 ```
 
 It lists the stages, their tools, the model it would use, and says "ready" or why not.
@@ -69,7 +75,7 @@ It lists the stages, their tools, the model it would use, and says "ready" or wh
 ## 5. Run it
 
 ```bash
-flux task run isqrt/isqrt.problem.yaml --passes 3 --agent tools --json answer.json
+flux task run isqrt --passes 3 --agent tools --json answer.json
 ```
 
 `--agent tools` lets the model run checks inside its turns. What happened in a recorded run:
@@ -96,9 +102,10 @@ No design reached 1000 MHz, and the report says so. Left running, the loop keeps
 | to | add |
 |---|---|
 | let the model pick the next step | `--agent orchestrate`, or `flow: {orchestrate: agent}` |
-| let the model plan each pass | `--agent plan`, or `flow: {plan: llm}` |
-| let a coding agent write the design | `flow: {generate: {agent: opencode}}` (or `claude`, `codex`) |
-| give the model a method note | `knowledge: {files: [method-note.md]}` |
+| let the model plan each pass | `--agent plan`, or `flow: {plan: model}` |
+| let a coding agent write the design | `flow: {generate: {by: opencode}}` (or `claude`, `codex`) |
+| give the model a method note | `flow.knowledge: {files: [method-note.md]}` |
 | steer it while it runs | `--tui`, then `f` to type a note |
 
-Next: [build your own](build-your-own.md) or [the loop](loop-shape.md).
+Next: [build your own](build-your-own.md), or [the loop](loop-shape.md) for what each of these
+steps is.

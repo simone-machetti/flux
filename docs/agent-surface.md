@@ -17,8 +17,7 @@ flux task run   applications/mul8/mul8.problem.yaml --json answer.json
 
 `flux task run DOC --json FILE` writes what the pass decided ([D591](decisions.md)): the
 decision with its metrics and artifact path, the frontier, what was refused and why, what is
-not established, the lessons, the report's lines, and the application's own answer (its
-world's `result` hook) under `result`. The record (`--db`) keeps everything else, readable with
+not established, the lessons and the report's lines. The record (`--db`) keeps everything else, readable with
 `flux report`. To ask a different question of the same problem, copy the document and change
 its `params`, `objectives`, `budget` or `flow`; a changed ask opens its own record.
 
@@ -39,9 +38,9 @@ Any document can hand generation to a coding agent instead of the model
 
 ```yaml
 flow:
-  generate: {agent: opencode}                  # a preset: opencode, claude, codex
-  # generate: {agent: {preset: claude, questions: model, max_questions: 2}}
-  # generate: {agent: {command: [my-agent, "{prompt_file}", "{artifact}"], timeout_s: 900}}
+  generate: {by: opencode}                  # a preset: opencode, claude, codex
+  # generate: {by: claude, questions: model, max_questions: 2}}
+  # generate: {by: {command: [my-agent, "{prompt_file}", "{artifact}"], timeout_s: 900}}
 ```
 
 One session per part (D669): the first draft reads the whole brief; a repair or a critic's
@@ -54,8 +53,9 @@ uses its own model, tools and skills; the loop then reads the artifact and runs 
 check and gate around it, exactly as around a model's reply. When a headless agent stops to ask
 a question, `questions:` says who answers: nobody (`decide`, the default), the loop's `model`,
 or the `operator` at the TUI ([D585](decisions.md)). With `budget.prototype: true` the agent
-writes the Python prototype instead and checks it with `flux rtl proto`; the loop spells the
-RTL ([D618](decisions.md)). [models.md](models.md) covers the agents' own configuration.
+writes the Python prototype instead; the loop checks it with `flux rtl proto` and spells the
+RTL ([D618](decisions.md)). The agent writes and never runs: the loop compiles, tests and
+measures, and brings a failure back to the agent's session ([D673](decisions.md)). [models.md](models.md) covers the agents' own configuration.
 
 ## An outside agent driving Flux
 
@@ -72,6 +72,18 @@ more. A coding agent finds them where it looks for skills (the loop copies them 
 `.claude/skills/`, `.opencode/skills/` and `.agents/skills/` in its work directory). The loop's
 model sees an index in every prompt and loads a skill's instructions or files with the `skill`
 tool inside its turn.
+
+## The workbench
+
+The agents' own folder for tools and notes ([D677](decisions.md)): `workbench/` beside the
+document, always (D790). It is made on the first
+agent turn with `tools/` and `notes/` and is kept across runs. Every agent of the problem
+(generate, prototype, every box) finds it as `workbench/` in its work directory, and its brief
+lists what the folder holds, one line per file. The agents build tools there (scripts that fit,
+tabulate or analyse) and keep notes (the method, what failed and why). This is knowledge built
+inside the loop, beside the lessons that `knowledge.lessons` draws from measured results between passes.
+The loop provides the folder and never reads it. Commit it with the application if it is worth
+keeping.
 
 ## The model and the agentic halves
 
@@ -92,8 +104,8 @@ With a model that makes tool calls, the loop offers three agentic halves
 
 What none of the halves may decide: admission. The gate stays the exhaustive test's.
 
-A coding agent can also answer any box but the gate and the stages: `flow: {critique: {agent:
-claude}}`, `{orchestrate: {agent: opencode}}`, `{dse: {agent: codex}}`, and so on. The loop writes
+A coding agent can also answer any box but the gate and the stages: `flow: {critique: {by:
+claude}}` (or `critique: claude`), `{orchestrate: {by: opencode}}`, `{orchestrate: {by: codex}}`, and so on. The loop writes
 the question, checks the agent's `out.json`, sends a refused answer back once, then falls back to
 the rules half; every turn is on the record ([design-agent-loop.md](design-agent-loop.md), D640).
 
@@ -118,7 +130,7 @@ index (`retrieval.py`, no embeddings or API key) over an ingested corpus whose p
 is kept on every chunk: five chapters of the RISC-V unprivileged ISA manual (CC BY 4.0, parsed
 from the upstream AsciiDoc) and the curated `design-guidance` corpus (original prose,
 [D244](decisions.md)/[D267](decisions.md): memory implementation, multi-port composition,
-datapath PPA, interconnect fabric selection). A document's `knowledge:` block and the
+datapath PPA, interconnect fabric selection). A document's `flow.knowledge` and the
 `knowledge` tool reach it. The sibling `mentor/records/` package (`flux_records.mining`)
 computes typed facts from the campaign and calibration stores, never ingested into the BM25
 index ([D243](decisions.md)), and renders them into prompts ([D245](decisions.md)). Not

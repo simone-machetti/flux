@@ -20,8 +20,8 @@ def cache_lookup(problem: Problem, state: LoopState, cand: Candidate, stage: str
     cache = state.cache
     if cache is None:
         return None
-    key = f"{problem.name}/{stage}/{cand.key()}"
     try:
+        key = f"{problem.name}/{stage}/{problem.cache_key(cand, stage, state)}"
         return cache.get(key) if cache.holds(key) else None
     except Exception:  # noqa: BLE001
         return None
@@ -279,7 +279,9 @@ class Ahead:
             with _phase(f"{kind}: {stage} (ahead: {part} alone)", why="while the model writes the next part"):
                 return problem.measure(cand, stage, state)
 
-        self.futures[key] = self.pool.submit(work)
+        from flux_profile import carried
+
+        self.futures[key] = self.pool.submit(carried(work))      # D739: under the phase that started it
         self.started += 1
         return True
 

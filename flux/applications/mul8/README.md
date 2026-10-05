@@ -35,12 +35,12 @@ The record goes to `applications/mul8/out/mul8.db` and the chosen design to `out
 
 ## Change it
 
-- **Let a coding agent write it:** set `flow: {generate: {agent: opencode}}` (or `claude`,
+- **Let a coding agent write it:** set `flow: {generate: {by: opencode}}` (or `claude`,
   `codex`); the agent uses its own model and tools, and the loop's gate and stages judge what it
   wrote.
 - **Another target:** the `goal` of the `fmax_mhz` objective and `--clock-ps` in the two stage
   commands.
 - **Another circuit:** a new statement and contract, a `golden.py` with its `PORTS` and
-  `golden()`, and a new `id:`. Nothing else changes: that is the whole of an RTL
+  `golden()`, in a folder of its own (its name is the id). Nothing else changes: that is the whole of an RTL
   problem.
 - **More tries:** `budget.steps` (designs per pass) and `budget.repair_attempts`.

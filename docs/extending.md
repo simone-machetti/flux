@@ -17,8 +17,8 @@ or `flow`. A changed ask opens its own record.
 
 ## 2. The gate and the stages: any command (stable)
 
-A gate and a stage are commands, so any language and any tool will do. A gate may be a list of
-named checks run in order (`[{name, run}, ...]`, D652); the first that fails refuses the design.
+A gate and a stage are commands, so any language and any tool will do. A gate may be several
+named checks run in order (`test: {lint: ..., golden: ...}`, D652, D789); the first that fails refuses the design.
 
 | command | prints | exit |
 |---|---|---|
@@ -27,7 +27,7 @@ named checks run in order (`[{name, run}, ...]`, D652); the first that fails ref
 | a stage's `command` | `name=value` tokens; the stage reads the `metrics` it lists | non-zero: the stage failed for that candidate |
 
 Placeholders in any command: `{artifact}` (the candidate's file), `{home}` (the document's
-folder), `{workdir}`, `{name}`, `{part}`, `{python}`, and `{knob}` for each knob of `space`. A
+folder), `{workdir}`, `{name}`, `{part}`, `{python}`, and `{knob}` for each knob of `flow.orchestrate.space`. A
 command starting with `flux` runs this Flux. A stage lists the tools it needs under `needs:`; a
 stage whose tools are missing is skipped and reported (`WILL SKIP` in `task check`, `NOT RUN`
 in the report).
@@ -36,11 +36,11 @@ in the report).
 
 `flow.generate`:
 - `model` (the default): the model writes it and repairs it from the gate's output.
-- `{command: "..."}`: a script renders it. With a `space`, the script runs once per point with
+- `{command: "..."}`: a script renders it. With a space (`flow.orchestrate.space`), the script runs once per point with
   the knobs as placeholders (`flux new --kind sweep`).
-- `{agent: opencode|claude|codex}` or `{agent: {command: [...], timeout_s: N, questions:
-  decide|model|operator}}`: a coding agent writes it in a work directory. Its brief includes
-  the gate command to check its draft against.
+- `{by: opencode|claude|codex}` or `{by: {command: [...]}, timeout_s: N, questions:
+  decide|model|operator}`: a coding agent writes it in a work directory. It does not compile or
+  test: the loop runs the gate and brings a failure back to its session (D673, D674).
 - `{catalog: [files]}`: designs that already exist.
 
 ### A prototype before the target (evolving, D604)
@@ -64,15 +64,15 @@ oversized is built (D615): a prototype costing more than `budget.prototype_cost_
 spelled nor synthesised. If the document
 names a `golden.py` that does not exist, the model writes it first from the statement and the
 contract. That golden is checked (it imports, makes its vectors, answers every output port),
-but read it before trusting a decision made against it. With `flow.generate: {agent: ...}`, a coding agent writes the prototype
-and checks it with `flux rtl proto FILE --golden golden.py`, the stage's own check (D618).
+but read it before trusting a decision made against it. With `flow.generate: {by: ...}`, a coding agent writes the prototype
+and the loop checks it with `flux rtl proto FILE --golden golden.py`, the stage's own check (D618).
 
 ## 4. How the search goes (stable names, evolving fields)
 
-`flow.dse` names a policy: `sweep`, `montecarlo`, `anneal`, `gradient`, `genetic`, `pareto`,
-`control`, or `llm` (the model proposes points from what was measured). It can also be a list of
+`flow.orchestrate` names a policy: `sweep`, `montecarlo`, `anneal`, `gradient`, `genetic`, `pareto`,
+`control`, or `model` (the model proposes points from what was measured). It can also be a list of
 phases, each starting from where the last ended:
-`[{name: walk, policy: gradient, budget: 12}, {name: propose, policy: llm, rounds: 1}]`. The
+`[{name: walk, policy: gradient, budget: 12}, {name: propose, policy: model, rounds: 1}]`. The
 fields each policy takes are listed by the error a wrong one gets.
 
 **A policy of your own** (evolving, D602) is a `flux_loop.dse.Policy` subclass in a file beside
@@ -96,46 +96,44 @@ class EveryOther(Policy):
 
 ```yaml
 flow:
-  dse: every_other:EveryOther                              # or, as a phase:
+  orchestrate: every_other:EveryOther                              # or, as a phase:
   # dse: [{policy: "every_other:EveryOther", stride: 3}]
 ```
 
-## 5. A world: what a document cannot say (evolving)
+## 5. What a document cannot say: commands beside it (evolving)
 
-When a problem needs code, such as a simulator, a solver, a transpiler or a composition of
-parts, the document names a world: `world: module:World`. It's a class built with the problem,
-whose methods are hooks the loop calls. The module may be installed, or be a file beside the
-document. Only the hooks the world needs are filled; `*` marks the core ones of each box:
+When a problem needs code -- a simulator, a solver, a search of its own, a composition -- the
+code is a command the document names in the box it belongs to (D798-D803):
 
-| box | hooks |
-|---|---|
-| knowledge | `*prepare`, `*knowledge`, `mentor_sections`, `versions`, `from_record`, `open_records` |
-| orchestrate | `*review`, `next_work`, `plan_prompt`, `standing` |
-| dse | `*search`, `space`, `instantiate`, `seeds`, `moves` |
-| generate | `*design_prompt`, `*parse_design`, `rewrite_prompt`, `patch_prompt`, `prompt_prefix`, `tools`, `apply_tools`, `transpile`, `redesign_note` |
-| test | `*build`, `*fast_check`, `*judge`, `describe_failure` |
-| evaluate | `*measure`, `measure_batch`, `cache_key`, `compose`, `analytic_stages`, `analytic_metrics`, `evaluator_name` |
-| select | `*frontier`, `*finalists`, `frontier_axes`, `*decide`, `*conclusion` |
+| what the document cannot say | the command beside it | what it reads and writes |
+|---|---|---|
+| a check of your own | `flow.test: {name: "{python} {home}/check.py {artifact}"}` | prints `N failing`; exit 3 = did not build |
+| a measurement | `flow.measure: {name: {command: ..., metrics: [...]}}` | prints `name=value` |
+| a generator over a space | `flow.generate: {command: "... {knob} {artifact}"}` or `{point}` | writes `{artifact}` |
+| a search of your own -- a solver, a proof, a model it asks itself | `flow.orchestrate: {command: "... {history} {state} {params}"}` | reads what was measured and refused, keeps its state, prints the next candidates, lessons, a conclusion (D799) |
+| a composition of sub-loops | the parent's `flow.generate: {command: "... {parts} {artifact}"}` | reads each sub-loop's answer, writes the whole (D801) |
+| settings | `params:` | `{params}`: a JSON file any command reads |
 
-A world may also define `result(out)`, the application's own answer, which `--json` includes.
-The four worlds in `applications/` (bankmap, interconnect_mapping, macarray, nlu)
-are worked examples, from small to large. `flux task check` names a hook a world may not fill.
+The applications are worked examples: `macarray` (a generator, a check and an invention problem
+beside the study), `bankmap` (a search command: baseline, proof, z3, model rounds),
+`interconnect_mapping` (a search command over pairs written as JSON), `nlu` (seven sub-loops in
+folders). Their step commands live in a package beside the document (`python -m flux_<app>.steps`).
 
 ## 6. Who fills a role (evolving)
 
 The loop has four roles: orchestrator, generator, evaluator, knowledge. Each can be switched
 per run (`--role orchestrator=rules`) or per document (its box in `flow:`, e.g. `flow: {orchestrate: rules}`); `flux task check` lists the
 choices. A component of your own registers with
-`flux_loop.register_role(role, name, factory)` from a module the document imports, for
-example its world's.
+`flux_loop.register_role(role, name, factory)` from a module the document imports.
 
 ## 7. Instructions for the model and the agents (stable)
 
 A skill is a folder with a `SKILL.md` (a `name`, a `description`, then instructions) and any
 files it brings. `skills: [dir]` in a document, or `--skill DIR`, gives it to the loop's model
 (in every prompt, or through the `skill` tool for large libraries) and to coding agents (copied
-where they look for skills). `knowledge: {files: [...]}` puts specs, reference code and PDFs in
-every prompt.
+where they look for skills). `flow.knowledge: {files: [...]}` puts specs, reference code and PDFs in
+every prompt. The agents keep their own tools and notes in `workbench/` beside the document,
+across runs; the loop never reads it (D677).
 
 ## 8. Driving Flux from a script (stable)
 
@@ -150,7 +148,7 @@ In Python:
 ```python
 from flux_loop import PromptProblem, TaskSpec, load_task, request_for, run_loop
 
-task = load_task("my.problem.yaml")
+task = load_task("my")                       # the folder: my/problem.yaml, id `my`
 problem = PromptProblem(task)
 out = run_loop(problem, request_for(task, db="my.db"), proposer=None)   # None: no model
 print(out.decision, out.frontier, out.refused)

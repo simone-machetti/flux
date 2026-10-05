@@ -1,3 +1,8 @@
+---
+hide:
+  - navigation
+---
+
 # Build your own problem
 
 From an empty folder to a running search in six steps. Prefer a form? Use the
@@ -19,11 +24,12 @@ flux new myproblem --kind rtl
 | `tune` | the knobs go straight into your own commands | `check.py`, `bench.py` | no |
 
 `flux new` writes `myproblem/` with a document, the scripts it names and a README. It runs as it
-is.
+is. For larger complete problems to copy from, see the repository's
+[`flux/applications/`](https://github.com/choelzl/flux/tree/main/flux/applications) folder.
 
 ## 2. Say what you want
 
-Edit `myproblem/myproblem.problem.yaml`:
+Edit `myproblem/problem.yaml`:
 
 - `statement`: the request in plain words. The model reads it.
 - `contract`: rules every design must follow (names, ports, what is forbidden).
@@ -34,17 +40,18 @@ Edit `myproblem/myproblem.problem.yaml`:
 
 - `rtl`: edit `golden.py`: `PORTS` and a `golden(**inputs)` function returning the right outputs.
 - `python`, `sweep`, `tune`: edit `check.py` so it prints `N failing` (0 when correct).
-- For a knob search: list the knobs under `space:` and write each design in the generator script.
+- For a knob search: list the knobs under `flow.orchestrate.space` and write each design in the generator script.
 
 Papers help. Put PDFs, notes or reference code in `flux/mentor/knowledge/library/` (every
-problem on the machine) or in a folder beside the document named by `knowledge: {library: papers}`.
+problem on the machine) or in `library/` beside the document (this problem's own). Each paper is
+summed up once by the model (or `flow.knowledge: {by: opencode}`).
 Excerpts that match the statement, contract and parts reach the model's prompts, and the coding
-agents get the file paths to open. `flow: {knowledge: none}` turns it off.
+agents get the file paths to open. `flow: {knowledge: off}` turns it off.
 
 ## 4. Check it
 
 ```bash
-flux task check myproblem/myproblem.problem.yaml
+flux task check myproblem
 ```
 
 It runs nothing. It lists the loop's boxes, the stages and their tools, the library, and says
@@ -53,10 +60,13 @@ what is missing.
 ## 5. Run it
 
 ```bash
-flux task run myproblem/myproblem.problem.yaml --passes 1
+flux task run myproblem --passes 1
 ```
 
-Drop `--passes 1` to let it run until you stop it. Add `--tui` for the live screen.
+Drop `--passes 1` to let it run until you stop it. Add `--tui` for the live screen. A search
+(`flow.orchestrate` with its `space`) tries one design a pass, the next picked from what the last ones
+measured: give it a pass per point, or `budget.batch: N` for N designs a pass.
+[Run a problem](run.md) has the options, stopping and resuming, and choosing the AI model.
 
 ## 6. Read the result
 
@@ -71,25 +81,26 @@ writes an HTML page of the whole search.
 | `id` | a short name (letters, digits, `_`); names the record, so an edited document resumes it |
 | `statement`, `contract` | the request and its rules, in words |
 | `language` | `systemverilog`, `verilog`, `python`, `c`, `cpp`, `text`, ...: the file type |
-| `gate` | a command that prints `N failing` or exits non-zero; or a list of named checks, run in order |
-| `stages` | measurements, cheapest first: `{name, command}`; a command of yours prints `name=value` and lists `metrics:`; `cutoff:` one gate `{metric, at\|below\|within}` or a list, all must pass |
 | `objectives` | `{metric, direction, goal}`: direction `minimize` or `maximize`; each `goal` is a limit (at least / at most), the goal-less ones decide in order, `balance: true` ones as their knee; `{keep: 0.9, above: 1.0}` is a limit relative to the best |
-| `space` | knob -> its choices, for a search |
-| `seeds` | settings measured before the search starts |
-| `knowledge` | `{files: [...]}` the model reads with every prompt; `{library: papers}` a folder of papers |
-| `flow` | who fills each box ([the loop](loop-shape.md)) |
-| `budget` | `steps`, `passes`, `repair_attempts`, `finalists`, `workers`, `prototype` |
+| `flow` | each box of [the loop](loop-shape.md): who fills it, and its own settings (below) |
+| `flow.test` | a command that prints `N failing` or exits non-zero; or a map of named checks, run in order |
+| `flow.measure` | measurements, cheapest first, by name: `screen: <command>`; a command of yours prints `name=value` and lists `metrics:`; `cutoff:` one gate `{metric, at\|below\|within}` or a list, all must pass |
+| `flow.orchestrate` | the search: `sweep`, ..., or `{policy: sweep, space: {knob: [choices]}, seeds: [...]}` (the settings measured first) |
+| `flow.knowledge` | `{files: [...]}` the model reads with every prompt; `agent: opencode` digests the library instead of the model; `off` |
+| `flow.select` | `{finalists: 3}`: how many reach the costliest stage |
+| `budget` | `steps`, `passes`, `repair_attempts`, `workers`, `prototype` |
 
 In commands: `{artifact}` is the design file, `{home}` the document's folder, `{python}` the
-Python in use, and `{knob}` each knob of `space:`. A command starting with `flux` runs this Flux.
+Python in use, and `{knob}` each knob of `flow.orchestrate.space`. A command starting with `flux` runs this Flux.
 
 A gate can be several checks, cheapest first. Each has a name and a command; the first that
 fails refuses the design, and the repair is told where it failed:
 
 ```yaml
-gate:
-  - {name: lint, run: "flux rtl lint {artifact}"}
-  - {name: golden, run: "flux rtl test {artifact} --golden {home}/golden.py"}
+flow:
+  test:                    # by name, run in the order written
+    lint: flux rtl lint {artifact}
+    golden: {run: "flux rtl test {artifact} --golden {home}/golden.py", timeout_s: 300}
 ```
 
 A stage's `cutoff` is its gate: `cutoff: {metric: fmax_mhz, at: 1000}` sends on only the designs
@@ -103,21 +114,22 @@ the RTL from it). Use `false` for plain logic such as adders.
 Every key is in the
 [author reference](https://github.com/choelzl/flux/blob/main/flux/core/loop/src/flux_loop/author_reference.md).
 
-## When you need code: a world
+## When you need code: commands beside the document
 
-When a document cannot say it (a solver, a simulator, a custom search), write a Python class and
-name it once: `world: flux_toy.world:World`. The loop calls the methods it has and keeps its
-defaults for the rest. The usual ones:
+When a document cannot say it in prose or numbers (a solver, a simulator, a search of its own),
+write a script and name it in the box it belongs to:
 
-| method | job |
-|---|---|
-| `judge(built, cand, subgoal, state) -> Verdict` | the gate: `Verdict(ok, score, why)` |
-| `measure(cand, stage, state) -> dict` | one stage: metric name -> number |
-| `search(state)` | a generator yielding batches of candidates |
-| `design_prompt`, `parse_design` | how a model is asked for a design, and how its reply becomes one |
+| what the document cannot say | the command beside it | what it reads and writes |
+|---|---|---|
+| a check of your own | `flow.test: {name: "{python} {home}/check.py {artifact}"}` | prints `N failing`; exit 3 = did not build |
+| a measurement | `flow.measure: {name: {command: ..., metrics: [...]}}` | prints `name=value` |
+| a generator over a space | `flow.generate: {command: "... {knob} {artifact}"}` or `{point}` | writes `{artifact}` |
+| a search of your own -- a solver, a proof, a model it asks itself | `flow.orchestrate: {command: "... {history} {state} {params}"}` | reads what was measured and refused, keeps its state, prints the next candidates, lessons, a conclusion (D799) |
+| a composition of sub-loops | the parent's `flow.generate: {command: "... {parts} {artifact}"}` | reads each sub-loop's answer, writes the whole (D801) |
+| settings | `params:` | `{params}`: a JSON file any command reads |
 
-The world's settings are the document's `params:`. `flux task check` lists every method a world
-may fill. Worked examples:
-[bankmap](https://github.com/choelzl/flux/tree/main/flux/applications/bankmap),
+Worked examples:
 [macarray](https://github.com/choelzl/flux/tree/main/flux/applications/macarray),
-[nlu](https://github.com/choelzl/flux/tree/main/flux/applications/nlu).
+[bankmap](https://github.com/choelzl/flux/tree/main/flux/applications/bankmap),
+[interconnect_mapping](https://github.com/choelzl/flux/tree/main/flux/applications/interconnect_mapping),
+[nlu](https://github.com/choelzl/flux/tree/main/flux/applications/nlu) (seven sub-loops in folders).

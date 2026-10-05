@@ -8,7 +8,7 @@ description: Drive Flux, the AI-driven design-space exploration loop for hardwar
 Flux runs one loop: a generator proposes candidates (a model, a script over knobs, or a coding
 agent), a **gate** refuses the wrong ones with a real test, **stages** measure the survivors
 cheapest first, and the loop **decides** against the objectives and keeps a **record**. What a
-run does is said by a **problem document** (`*.problem.yaml`). You never write the design
+run does is said by a **problem document** (`<folder>/problem.yaml`; the folder's name is its id). You never write the design
 yourself inside Flux's loop: you write or pick the problem, run it, and read the answer.
 
 ## Where it runs
@@ -27,10 +27,10 @@ yourself inside Flux's loop: you write or pick the problem, run it, and read the
 
 1. **An existing document** (the ask matches one): `applications/` holds adder16, mul8
    (RTL with a golden model), bankmap, interconnect_mapping, macarray, nlu, prefetcher. Copy the
-   document next to it (or anywhere) and change `params:`, `objectives:`, `budget:`, `flow:` to
+   folder (its name is the copy's id) and change `params:`, `objectives:`, `budget:`, `flow:` to
    ask a different question; a changed ask opens its own record.
 2. **A prompt and files, and let Flux write the problem**:
-   `flux ask "what you want" --file spec.pdf --file ref.sv [--author model|opencode|claude|codex] [--dir out/ask-x] [--passes N] [--no-run]`.
+   `flux ask "what you want" --file spec.pdf --file ref.sv [--author model|opencode|claude|codex] [--dir out/ask_x] [--passes N] [--no-run]`.
    The author writes `problem.yaml` + its golden model/scripts, Flux checks the document, runs
    it, and the author revises between passes. Use `--no-run` to review the document first.
 3. **Write the document yourself** (you know exactly what is wanted): read
@@ -38,20 +38,23 @@ yourself inside Flux's loop: you write or pick the problem, run it, and read the
    reference and the rules for golden models. Minimal RTL shape:
 
 ```yaml
-id: mul8
+# mul8/problem.yaml -- the folder's name is the problem's id; the document does not say it
 statement: >-            # the ask in prose: the model reads it
   A combinational signed 8x8 -> 16-bit multiplier ...
 contract: >-             # rules every candidate must follow: ports, names, what is forbidden
   One module named exactly `mul8`, ports ..., purely combinational.
 language: systemverilog
-gate: flux rtl test {artifact} --golden {home}/golden.py   # refuses before anything costs
-stages:                  # cheapest first; `flux rtl measure` knows its metrics and tools
-  - {name: screen,  command: "flux rtl measure {artifact} --stage synth --clock-ps 1000"}
-  - {name: confirm, command: "flux rtl measure {artifact} --stage place --clock-ps 1000"}
+
+flow:
+  test: flux rtl test {artifact} --golden {home}/golden.py   # refuses before anything costs
+  measure:                  # cheapest first; `flux rtl measure` knows its metrics and tools
+    screen: "flux rtl measure {artifact} --stage synth --clock-ps 1000"
+    confirm: "flux rtl measure {artifact} --stage place --clock-ps 1000"
+  select: {finalists: 2}
 objectives:              # the first is the goal; the second breaks ties among those meeting it
   - {metric: fmax_mhz, direction: maximize, goal: 1000}
   - {metric: area_um2, direction: minimize}
-budget: {steps: 4, repair_attempts: 6, prototype: false, finalists: 2}   # prototype: true for numeric functions (below)
+budget: {steps: 4, repair_attempts: 6, prototype: false}  # prototype: true for numeric functions (below)
 ```
 
 ## Run it
@@ -82,15 +85,15 @@ flux task run DOC --tui                  # the curses screen, for a person watch
 
 `flow:` says how the search goes; mix them per problem:
 - `generate: model` -- the model writes each candidate and repairs it against the gate's failures.
-- `space:` (knob -> ordered choices) + `generate: {command: "{python} {home}/render.py {knob} {artifact}"}`
+- `orchestrate: {policy: sweep, space: {knob: [ordered choices]}}` + `generate: {command: "{python} {home}/render.py {knob} {artifact}"}`
   -- a script renders each point; no model needed.
-- `dse:` a policy (`sweep`, `gradient`, `anneal`, `genetic`, `montecarlo`, `pareto`, `llm`) or a
+- `orchestrate:` with a space, a search (D797): a policy (`sweep`, `gradient`, `anneal`, `genetic`, `montecarlo`, `pareto`, `model`) or a
   list of phases, each continuing from where the last ended:
-  `[{name: walk, policy: gradient, budget: 12}, {name: propose, policy: llm, rounds: 1, batch: 4}]`.
-- `generate: {agent: opencode|claude|codex}` -- a coding agent writes the candidate in a work
-  directory; the loop still gates and measures it. `{agent: {preset: claude, questions: model}}`
+  `[{name: walk, policy: gradient, budget: 12}, {name: propose, policy: model, rounds: 1, batch: 4}]`.
+- `generate: {by: opencode|claude|codex}` -- a coding agent writes the candidate in a work
+  directory; the loop still gates and measures it. `{by: claude, questions: model}`
   says who answers when the agent asks (`decide`, the default: nobody; `model`; `operator`).
-- Improving an existing design: put it (or the reference) in `knowledge: {files: [...]}` and say
+- Improving an existing design: put it (or the reference) in `flow.knowledge: {files: [...]}` and say
   in `statement` what must get better, and let the run go on: it keeps evolving until stopped.
 - `skills: [dir]` / `--skill DIR` gives the loop's model and agents extra instructions.
 
@@ -108,7 +111,7 @@ RTL directly rarely passes.
   work on the mantissa; one fixed-point format cannot span the range.
 - A prototype whose estimated hardware cost is over `budget.prototype_cost_max` (default 2,000,
   about 650 um2 on ASAP7) is made cheaper before anything is built.
-- A method note in `knowledge: {files: [...]}` (the method and measured facts, not a design)
+- A method note in `flow.knowledge: {files: [...]}` (the method and measured facts, not a design)
   helps a model most. `applications/gelu_fp16/` is a worked example.
 
 ## Read the answer

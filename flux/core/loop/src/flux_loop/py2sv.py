@@ -68,6 +68,8 @@ class _Compiler:
         return self.nodes[n].op == "const"
 
     def op(self, kind: str, *args: int, guard: int = -1, value: Any = None) -> int:
+        if any(isinstance(a, list) for a in args):
+            raise Unsupported(f"a tuple of values used as one value (in `{kind}`): take its parts first")
         if kind in _FOLD and all(self.is_const(a) for a in args):
             try:
                 return self.const(_FOLD[kind](*[self.nodes[a].value for a in args]))
@@ -92,6 +94,8 @@ class _Compiler:
         return len(self.nodes) - 1
 
     def truth(self, n: int, g: int) -> int:
+        if isinstance(n, list):
+            raise Unsupported("a tuple of values used as a condition")
         return n if self.nodes[n].op in _BOOLEAN else self.op("truth", n, guard=g)
 
     def both(self, a: int, b: int, g: int) -> int:
@@ -133,11 +137,13 @@ class _Compiler:
                 self.assign(env, t.id, val, g)
             return
         if (isinstance(st, ast.Assign) and len(st.targets) == 1 and isinstance(st.targets[0], ast.Tuple)
-                and isinstance(st.value, ast.Tuple) and len(st.targets[0].elts) == len(st.value.elts)
                 and all(isinstance(t, ast.Name) for t in st.targets[0].elts)):
-            # `g, r, s = 0, 0, 0` and `a, b = b, a`: every value first, then every name
-            vals = [self.expr(v, g, env) for v in st.value.elts]
-            for t, v in zip(st.targets[0].elts, vals):
+            # `g, r, s = 0, 0, 0`, `a, b = b, a` and `s, m, k = unpack(x)` (D804): every value
+            # first, then every name
+            vals, names = self.expr(st.value, g, env), st.targets[0].elts
+            if not isinstance(vals, list) or len(vals) != len(names):
+                raise Unsupported(f"line {st.lineno}: {len(names)} names from a value that is not {len(names)} values")
+            for t, v in zip(names, vals):
                 self.assign(env, t.id, v, g)
             return
         if isinstance(st, ast.AugAssign) and isinstance(st.target, ast.Name):
@@ -171,7 +177,13 @@ class _Compiler:
                     frame.ret[k.value] = self.op("mux", g, val, frame.ret[k.value], guard=-1) if k.value in frame.ret else val
             else:
                 val = self.expr(st.value, g, env)
-                frame.ret[""] = self.op("mux", g, val, frame.ret[""], guard=-1) if "" in frame.ret else val
+                if "" in frame.ret:                         # a later return: its value where it is taken
+                    old = frame.ret[""]
+                    if isinstance(val, list) != isinstance(old, list) or (isinstance(val, list) and len(val) != len(old)):
+                        raise Unsupported(f"line {st.lineno}: the returns give different numbers of values")
+                    val = ([self.op("mux", g, v, o, guard=-1) for v, o in zip(val, old)] if isinstance(val, list)
+                           else self.op("mux", g, val, old, guard=-1))
+                frame.ret[""] = val
             frame.done = self.op("lor", frame.done, g, guard=-1)
             return
         raise Unsupported(f"line {getattr(st, 'lineno', '?')}: `{type(st).__name__}` is not spelled "
@@ -240,11 +252,22 @@ class _Compiler:
             return out
         if isinstance(e, ast.IfExp):
             c = self.truth(self.expr(e.test, g, env), g)
-            return self.op("mux", c, self.expr(e.body, self.both(g, c, g), env),
-                           self.expr(e.orelse, self.both(g, self.negate(c, g), g), env), guard=g)
-        if isinstance(e, ast.Subscript) and isinstance(e.value, ast.Name) and e.value.id in self.tables:
+            a = self.expr(e.body, self.both(g, c, g), env)
+            b = self.expr(e.orelse, self.both(g, self.negate(c, g), g), env)
+            if isinstance(a, list) or isinstance(b, list):          # D806: `p, q = (a, 1) if c else (1, a)`
+                if not (isinstance(a, list) and isinstance(b, list) and len(a) == len(b)):
+                    raise Unsupported(f"line {e.lineno}: the two sides give different numbers of values")
+                return [self.op("mux", c, x, y, guard=g) for x, y in zip(a, b)]
+            return self.op("mux", c, a, b, guard=g)
+        if isinstance(e, (ast.Tuple, ast.List)):              # D804: a tuple is a row of values, as a table's row is
+            vals = [self.expr(x, g, env) for x in e.elts]
+            if any(isinstance(v, list) for v in vals):
+                raise Unsupported(f"line {e.lineno}: a tuple of tuples is not spelled")
+            return vals
+        local = isinstance(e, ast.Subscript) and isinstance(e.value, ast.Name) and e.value.id in env
+        if isinstance(e, ast.Subscript) and isinstance(e.value, ast.Name) and e.value.id in self.tables and not local:
             return self.op("table", self.expr(e.slice, g, env), guard=g, value=e.value.id)
-        if isinstance(e, ast.Subscript) and isinstance(e.value, ast.Name) and e.value.id in self.rows:
+        if isinstance(e, ast.Subscript) and isinstance(e.value, ast.Name) and e.value.id in self.rows and not local:
             # a row of a table of rows: one lookup per column, at the same index (D618)
             i = self.expr(e.slice, g, env)
             return [self.op("table", i, guard=g, value=column_name(e.value.id, j)) for j in range(self.rows[e.value.id])]
@@ -253,8 +276,15 @@ class _Compiler:
             k = self.expr(e.slice, g, env)
             if isinstance(row, list) and self.is_const(k) and -len(row) <= self.nodes[k].value < len(row):
                 return row[self.nodes[k].value]
-            raise Unsupported(f"line {getattr(e, 'lineno', '?')}: only a table, or a row of a table of rows "
-                              "at a constant position, may be indexed")
+            if isinstance(row, list) and row and not self.is_const(k):
+                # D806: a tuple at a computed position, a multiplexer over its values (a negative
+                # position is not modelled: the measurement compares with design() and refuses it)
+                out = row[0]
+                for i in range(1, len(row)):
+                    out = self.op("mux", self.op("eq", k, self.const(i), guard=g), row[i], out, guard=g)
+                return out
+            raise Unsupported(f"line {getattr(e, 'lineno', '?')}: only a table or a tuple may be indexed"
+                              + (" (this position is outside it)" if isinstance(row, list) else ""))
         if isinstance(e, ast.Call):
             return self.call(e, g, env)
         raise Unsupported(f"line {getattr(e, 'lineno', '?')}: `{type(e).__name__}` is not spelled")
@@ -264,7 +294,13 @@ class _Compiler:
             return self.op("bitlen", self.expr(e.func.value, g, env), guard=g)
         if not isinstance(e.func, ast.Name) or e.keywords:
             raise Unsupported(f"line {e.lineno}: the call is not spelled")
+        if (e.func.id == "len" and len(e.args) == 1 and isinstance(e.args[0], ast.Name)
+                and e.args[0].id not in env and (e.args[0].id in self.tables or e.args[0].id in self.rows)):
+            t = e.args[0].id                                # D806: a module table's length, a constant
+            return self.const(len(self.tables[t] if t in self.tables else self.tables[column_name(t, 0)]))
         name, args = e.func.id, [self.expr(a, g, env) for a in e.args]
+        if name == "len" and len(args) == 1 and isinstance(args[0], list):
+            return self.const(len(args[0]))
         if name in ("int",) and len(args) == 1:
             return args[0]
         if name == "bool" and len(args) == 1:

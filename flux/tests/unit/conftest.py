@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -12,6 +13,7 @@ import pytest
 # A test never reads this machine's ~/.config/flux/flux.env (D651): `main()` would load its model
 # settings into the process and leak them into later tests.
 os.environ["FLUX_CONFIG"] = os.devnull + ".flux-tests"
+os.environ["FLUX_SANDBOX"] = "0"             # the tests run flux in-process; tests/unit/test_sandbox.py covers the sandbox
 
 FLUX_ROOT = Path(__file__).resolve().parents[2]
 
@@ -55,7 +57,7 @@ HEAVY_FILES = {
 HEAVY_TESTS = {
     "test_golden_prototype.py::test_a_spelled_design_sent_back_gets_a_cost_pass_on_its_prototype",
     "test_golden_prototype.py::test_the_prototype_is_proven_then_transcribed",
-    "test_golden_prototype.py::test_a_coding_agent_writes_the_prototype_and_runs_its_check",
+    "test_golden_prototype.py::test_a_coding_agent_writes_the_prototype_and_the_loop_checks_it",
     "test_golden_prototype.py::test_the_prototype_agent_is_resumed_until_its_prototype_passes",
     "test_golden_prototype.py::test_a_spelled_design_on_record_is_not_synthesised_again_once_over_the_ceiling",
     "test_golden_prototype.py::test_a_prototype_over_the_ceiling_is_made_cheaper_before_anything_is_built",
@@ -72,10 +74,56 @@ HEAVY_TESTS = {
 }
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """Scratch in memory when the machine has room (D715): the tests' records are SQLite, and each
+    commit's fsync costs 20-70 ms on a disk (one test paid 20 s for 305 commits; on a home over
+    sshfs, more) and nothing on tmpfs. The tests' own directories and the TMPDIR of what they run.
+    `--basetemp` or FLUX_TEST_SHM=0 keeps pytest's default."""
+    if config.option.basetemp or hasattr(config, "workerinput") or os.environ.get("FLUX_TEST_SHM") == "0":
+        return
+    shm = Path("/dev/shm")
+    try:
+        roomy = shm.is_dir() and os.access(shm, os.W_OK) and shutil.disk_usage(shm).free > 4 << 30
+    except OSError:
+        roomy = False
+    if roomy:
+        base = tempfile.mkdtemp(prefix="flux-pytest-", dir=shm)
+        config.option.basetemp = str(Path(base) / "t")        # xdist hands each worker its own folder under it
+        (Path(base) / "tmp").mkdir()
+        for k in ("TMPDIR", "TMP", "TEMP"):                   # the workers start after this: they inherit it
+            os.environ[k] = str(Path(base) / "tmp")
+        tempfile.tempdir = None
+        config._flux_shm = base                               # type: ignore[attr-defined]
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    base = getattr(config, "_flux_shm", None)
+    if base:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def _signals_as_they_were():
+    """A test that runs a process entry point in this process (`flux_web.stamp.main` ignores
+    SIGINT) leaves it ignored for every later test -- and every child process inherits an ignored
+    signal across exec, so a later "stop now" reaches nothing. Each test's handlers are undone."""
+    import signal
+
+    kept = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+    yield
+    for s, handler in kept.items():
+        signal.signal(s, handler)
+
+
 @pytest.fixture(autouse=True)
 def _own_trace_root(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
     """Every test registers its runs and traces under its own root, so parallel tests do not race (D531)."""
     monkeypatch.setenv("FLUX_TRACE_ROOT", str(tmp_path_factory.mktemp("traces")))
+    # D744: a sandboxed run's HOME is a Flux home; a test never starts one in the real home
+    monkeypatch.setenv("FLUX_SANDBOX_HOME", str(tmp_path_factory.mktemp("flux-home")))
+    # D745: a container command's variables file goes in the run's own runtime folder: a test's, not the machine's
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path_factory.mktemp("runtime")))
+    monkeypatch.setenv("FLUX_DIGESTS", str(tmp_path_factory.mktemp("digests")))   # D794: no test reads another's
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

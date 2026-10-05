@@ -8,7 +8,7 @@ hands the author the report; the author revises it for another pass, or says it 
 The author writes the problem, never the design. The document is checked before anything runs
 (it loads, uses only document keys, every tool is on PATH, every named file exists); a refused
 document goes back to the author with the reason, up to `checks` times. Input files are copied
-under `<workdir>/inputs/` and read through the document's `knowledge: {files: [...]}` (added
+under `<workdir>/library/` (D791: the loop's library) and read through the document's `flow: {knowledge: {files: [...]}}` (added
 when the author forgot them).
 """
 
@@ -31,21 +31,16 @@ FLUX_ROOT = HERE.parents[3]
 from .document import DOCUMENT_KEYS  # noqa: E402 -- the loader's own list (D590)
 
 #: The worked examples every author reads, live from the repository so they never drift.
-EXAMPLES = (("mul8", ("mul8.problem.yaml", "golden.py")),
-            ("adder16", ("adder16.problem.yaml", "golden.py", "gen.py")))
+EXAMPLES = (("mul8", ("problem.yaml", "golden.py")),
+            ("adder16", ("problem.yaml", "golden.py", "gen.py")))
 
 DOCUMENT = "problem.yaml"
 DONE = "done.txt"
 
 
 def document_path(workdir: Path) -> Path:
-    """The authored document: `problem.yaml`, or the one `*.problem.yaml` an author named after
-    the examples -- the newest when several."""
-    exact = workdir / DOCUMENT
-    if exact.is_file():
-        return exact
-    named = sorted(workdir.glob("*.problem.yaml"), key=lambda p: p.stat().st_mtime)
-    return named[-1] if named else exact
+    """The authored document: `problem.yaml`, the one name a document has (D786)."""
+    return workdir / DOCUMENT
 
 
 def reference() -> str:
@@ -73,9 +68,9 @@ def workspace_skills(paths: list[str | Path], workdir: Path) -> list[Any]:
 
 
 def workspace(files: list[str | Path], workdir: Path) -> list[Path]:
-    """The input files copied under `<workdir>/inputs/` (a folder is copied whole); the
-    paths the document will name, relative to the workdir."""
-    inputs = workdir / "inputs"
+    """The input files copied under `<workdir>/library/`, the loop's library (D791; a folder is
+    copied whole); the paths the document will name, relative to the workdir."""
+    inputs = workdir / "library"
     inputs.mkdir(parents=True, exist_ok=True)
     out: list[Path] = []
     for f in files:
@@ -110,7 +105,7 @@ class Ask:
 def _inputs_block(ask: Ask, *, inline: bool) -> str:
     if not ask.inputs:
         return "INPUT FILES: none."
-    lines = ["INPUT FILES (in the working directory; name them in `knowledge: {files: [...]}` so every design "
+    lines = ["INPUT FILES (in the working directory; name them in `flow: {knowledge: {files: [...]}}` so every design "
              "prompt reads them, and use them -- a reference model, tests, a spec -- in the gate where they fit):"]
     lines += [f"  - {p}" for p in ask.inputs]
     if inline:
@@ -233,13 +228,6 @@ def _agent_turn(ask: Ask, text: str, say: Callable[[str], None]) -> tuple[bool, 
                             answer=lambda _q: (DECIDE, "decide"), say=say)
     if not turn.ok:
         return False, f"the author {spec.tool} exited {turn.rc}: {(turn.stderr or turn.text)[-300:]}"
-    if target.is_file():
-        # an agent that first named its document after the examples, then wrote `problem.yaml`
-        # when nudged, leaves a copy: drop the one that says the same thing
-        same = " ".join(target.read_text().split())
-        for other in ask.workdir.glob("*.problem.yaml"):
-            if " ".join(other.read_text().split()) == same:
-                other.unlink()
     found = document_path(ask.workdir)
     now = found.read_text() if found.is_file() else None
     if done.is_file() and "DONE" in done.read_text().upper():
@@ -261,7 +249,7 @@ def _home_files(doc: dict[str, Any]) -> list[str]:
             for v in x:
                 walk(v)
 
-    walk({k: doc.get(k) for k in ("gate", "stages", "flow", "generator")})
+    walk({k: doc.get(k) for k in ("flow", "generator")})          # D775: the gate and the stages are in flow
     return sorted(set(tokens))
 
 
@@ -318,7 +306,7 @@ def check_document(workdir: Path, inputs: list[Path] = (), skills: bool = False)
     Input files the document forgot are added to its `knowledge.files`."""
     import yaml
 
-    from .document import TaskError, TaskSpec
+    from .document import TaskError, task_in
     from .task import PromptProblem
 
     path = document_path(workdir)
@@ -336,12 +324,13 @@ def check_document(workdir: Path, inputs: list[Path] = (), skills: bool = False)
     missing = [f for f in _home_files(doc) if not (workdir / f).is_file()]
     if missing:
         return None, None, f"the commands name {', '.join(missing)} beside the document, and it is not there: write it"
-    know = doc.get("knowledge") if isinstance(doc.get("knowledge"), dict) else ({"text": doc["knowledge"]} if doc.get("knowledge") else {})
+    flow = doc.get("flow") if isinstance(doc.get("flow"), dict) else {}
+    know = flow.get("knowledge") if isinstance(flow.get("knowledge"), dict) else {}
     named = set(know.get("files") or [])
     forgot = [str(p) for p in inputs if str(p) not in named]
     changed = False
-    if forgot:
-        doc["knowledge"] = {**know, "files": sorted(named | set(forgot))}
+    if forgot and flow.get("knowledge") != "off":     # D775: what is read is said in flow.knowledge
+        doc["flow"] = {**flow, "knowledge": {**know, "files": sorted(named | set(forgot))}}
         changed = True
     if skills and not doc.get("skills"):              # D588: the ask's skills go with the problem
         doc["skills"] = ["skills"]
@@ -349,7 +338,7 @@ def check_document(workdir: Path, inputs: list[Path] = (), skills: bool = False)
     if changed:
         path.write_text(yaml.safe_dump(doc, sort_keys=False))
     try:
-        task = TaskSpec.from_dict(doc, base=workdir)
+        task = task_in(doc, workdir)
         problem = PromptProblem(task)
     except (TaskError, ValueError) as exc:
         return None, None, f"the document does not load: {exc}"
@@ -388,7 +377,7 @@ def drive(ask: Ask, *, run_pass: Callable[..., Any], proposer: Any = None,
     every checked document before it runs: None runs it; a note sends it back to the author."""
     import inspect
 
-    from .passes import between_passes
+    from .passes import between_passes, carrying, mark
     from .task import task_report_lines
 
     takes_explore = len(inspect.signature(run_pass).parameters) >= 3
@@ -408,6 +397,7 @@ def drive(ask: Ask, *, run_pass: Callable[..., Any], proposer: Any = None,
 
     n = rests = 0
     settled = False
+    run_mark = object()             # D738: the passes share one search
     while True:
         current = document_path(ask.workdir).read_text() if document_path(ask.workdir).is_file() else ""
         if n and (not settled or rests):
@@ -456,7 +446,9 @@ def drive(ask: Ask, *, run_pass: Callable[..., Any], proposer: Any = None,
         digest = hashlib.sha256(document_path(ask.workdir).read_bytes()).hexdigest()[:12]
         if not ask.no_run:
             say(f"pass {n + 1}: running {task.id} (document {digest})")
-        out = run_pass(task, problem, rests) if takes_explore else run_pass(task, problem)
+        mark("pass", n=n + 1, explore=rests)
+        with carrying(run_mark):
+            out = run_pass(task, problem, rests) if takes_explore else run_pass(task, problem)
         report = task_report_lines(task, out, problem)
         history.append({"pass": n + 1, "turn": "run", "document": digest,
                         "decision": out.decision.candidate.name if out.decision is not None else None})

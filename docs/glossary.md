@@ -8,9 +8,9 @@ what to build, how to check it (the gate), how to measure it (the stages), what 
 (the objectives), and the budget. `flux task check <doc>` validates it; `flux task run <doc>`
 runs it.
 
-**World.** A Python package a problem document names under `world:`, for what a document
-cannot say: a generator that invents across rounds, a composition of parts, a simulator or a
-proof of its own. Many problems have no world (`applications/adder16/`, `applications/mul8/`).
+**Step command.** A command a document names for what it cannot say in prose or numbers -- a
+check, a measurement, a generator, a search (`orchestrate: {command}`), a composition -- often
+`python -m flux_<app>.steps ...` from a package beside it. There are no worlds (D803).
 
 **Gate.** The correctness check every candidate must pass before it is measured: golden
 vectors, an exhaustive check over every input, or a proof. The gate is always code, never a
@@ -44,7 +44,7 @@ of the NLU's seven. `parts:` lists them; `decompose` lets the model divide the g
 
 **Generator.** Whatever drafts candidates: a model, a script run once per design point
 (`flow: {generate: {command: ...}}`), a catalog of existing designs, a solver, or a coding
-agent (`flow: {generate: {agent: opencode}}`).
+agent (`flow: {generate: {by: opencode}}`).
 
 **Author.** In `flux ask`, the one who writes the problem document and its golden model from
 your prompt and files: the model by default, or a coding agent (`--author
@@ -54,6 +54,10 @@ opencode|claude|codex`). After each pass it reads the report and may revise the 
 any files it needs. Skills give the author, the model and coding agents extra know-how.
 Add them with `skills:` in a document or `--skill DIR`.
 
+**Workbench.** The coding agents' own folder beside the document (`workbench/`): tools they
+build and notes they keep, shared by every agent of the problem and kept across runs. The loop
+provides it and never reads it.
+
 **Golden model.** A short Python file, `golden.py`, that says what a design must compute
 (`PORTS` and a `golden(**inputs)` function), not how. `flux rtl test` checks RTL against it.
 
@@ -61,9 +65,9 @@ Add them with `skills:` in a document or `--skill DIR`.
 floating-point numbers. "Within 1 ULP" means the design's answer is at most one step away
 from the exact result, for every input. The NLU's gate uses this.
 
-**DSE, phases.** Design-space exploration: searching a `space:` of knobs and their choices
+**DSE, phases.** Design-space exploration: searching a space (`flow.orchestrate.space`) of knobs and their choices
 for the best designs. A DSE policy (`sweep`, `montecarlo`, `anneal`, `gradient`, `genetic`,
-`pareto`, or `llm`) picks which points to try. *Phases* are a list of such searches run in
+`pareto`, or `model`) picks which points to try. *Phases* are a list of such searches run in
 order, each starting where the last one ended, each with its own knobs.
 
 **Ladder.** The steps that improve a part that already works: `sweep` (pipeline registers),
@@ -72,7 +76,7 @@ order, each starting where the last one ended, each with its own knobs.
 rests when no step is due.
 
 **Mentor, knowledge.** What the model reads besides the problem: a methods sheet
-(`knowledge: {sheet: ...}`), a library of papers, facts mined from past records, and the
+(`flow.knowledge: {sheet: ...}`), a library of papers, facts mined from past records, and the
 record read back. The mentor is the fourth role, next to orchestrator, generator and
 evaluator.
 
@@ -82,7 +86,7 @@ pre-written half; `--role` swaps them.
 
 **Coding agent.** A terminal tool that takes a brief and writes files: Claude Code, Codex CLI,
 OpenCode or any command. One can be the author in `flux ask` or the generator of any document
-(`flow: {generate: {agent: opencode}}`); scripts and agents alike read a run's answer with
+(`flow: {generate: {by: opencode}}`); scripts and agents alike read a run's answer with
 `flux task run --json` ([agent-surface.md](agent-surface.md)).
 
 **ASAP7.** A free, predictive 7 nm process design kit from Arizona State University, used

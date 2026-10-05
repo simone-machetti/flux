@@ -13,7 +13,7 @@ from .provenance import trace_dir
 from .objective import Objectives
 from .observe import _phase, _publish, _publish_mentor
 from .problem import Problem
-from .records import _record_trial, _reload
+from .records import _record_trial, _reload, _reload_measured
 from .types import (BuildError, Candidate, Improve, LoopRequest, LoopResult, LoopState,
                     Scored, SubLoop, Verdict)
 
@@ -53,6 +53,7 @@ def run_loop(problem: Problem, request: LoopRequest, *, proposer: Any | None = N
     feedback = feedback if heard else None         # D666: `feedback: none` is no channel at all
     state = LoopState(request=request, say=say, proposer=proposer, feedback=feedback,
                       started=time.monotonic(), depth=depth)
+    state.__dict__["workbench"] = str(getattr(getattr(problem, "task", None), "workbench", "") or "")   # D677: every box agent's
     with _phase("gate: tools", why="refuse loudly before spending anything") as out:
         missing = problem.tools_missing()
         out["verdict"] = ("MISSING: " + ", ".join(missing)) if missing else "every tool the problem names is on PATH"
@@ -112,7 +113,10 @@ def run_loop(problem: Problem, request: LoopRequest, *, proposer: Any | None = N
         # D510: the traces of this pass under a name the record can point at
         state.workdir = trace_dir(getattr(state.records, "campaign_id", None), problem.name)
         if state.depth == 0 and getattr(state.records, "campaign_id", None):
-            ops.register(state.records.campaign_id, state.workdir, db=state.request.db)     # D513: `flux status/stop` see this run
+            run_dir = ops.register(state.records.campaign_id, state.workdir, db=state.request.db)     # D513: `flux status/stop` see this run
+            from .journal import attach
+
+            attach(run_dir)                  # D683: the live task tree, for `flux serve`
         try:
             from flux_feedback import reload_notes
 
@@ -129,7 +133,9 @@ def run_loop(problem: Problem, request: LoopRequest, *, proposer: Any | None = N
     # Both kinds of work are asked for before anything is reloaded (D457): a problem may have
     # batches, parts, or both. Only parts carry memory to re-verify, so the record is read
     # back only when there are parts.
-    searching: Iterator[list[Candidate]] | None = problem.search(state)
+    searching = _search_session(problem, state)     # D738: the search lives across passes
+    if searching is not None:
+        _reload_measured(problem, state)     # D682: before the walk's first step reads what is measured
     with _phase("propose: decompose", why="the parts this pass works on") as out:
         goals: list[str] = _work(state, problem.decompose(state))
         out["parts"] = _describe_parts(goals, problem, state)
@@ -157,6 +163,9 @@ def run_loop(problem: Problem, request: LoopRequest, *, proposer: Any | None = N
         _reload(problem, state, goals)
         todo = [] if "*" in state.admitted else [None]
     hunting = searching is not None
+    if depth == 0 and getattr(problem, "digesting", lambda: False)():   # D771: the papers digested in the Setup, before the Reading (D774)
+        with _phase("knowledge: digest", why="the library's papers, each once") as out:
+            out.update(problem.digest(state) or {})
     if depth == 0:            # a sub-loop does not own the live panels (D455)
         _publish(problem, state, todo, goals, "resumed", searching=hunting)
         _publish_mentor(problem, state)
@@ -173,6 +182,12 @@ def run_loop(problem: Problem, request: LoopRequest, *, proposer: Any | None = N
     # a design sent back to be improved -- and climbing the chain, so the evaluator->generator
     # edge is a cycle inside the pass.
     lad = problem.ladder()
+    from .pool import parallel_cap
+
+    cap = parallel_cap()
+    asked = max(int(request.workers or 0), int(request.parallel_parts or 1))
+    if cap is not None and asked > cap:          # D740: the server's cap, said where the run is read
+        state.say(f"  one at a time: the document asks {asked} at once; an admin allows parallel work in the loop's Advanced settings")
     if request.ahead and problem.stages() and problem.subgoals() and lad is not None and getattr(lad, "alone", None):
         # D563: the tools work while the model thinks -- only where the ladder declares the
         # stage a part is measured on alone; otherwise it would be a tool run for nothing
@@ -299,7 +314,7 @@ def _run_child(problem: Problem, state: LoopState, sub: SubLoop, todo: list) -> 
             pass
 
 
-def _run_steps(problem: Problem, state: LoopState, searching: Iterator[list[Candidate]] | None,
+def _run_steps(problem: Problem, state: LoopState, searching: "_SearchSession | None",
                todo: list, goals: list[str]) -> None:
     """The step loop (D457). Each step spends itself on one work item: a part to write (plan,
     generate against the fast test, judge), a sub-task run as its own loop (`SubLoop`, D455),
@@ -311,8 +326,9 @@ def _run_steps(problem: Problem, state: LoopState, searching: Iterator[list[Cand
     request = state.request
     got: list[Scored] = []
     hunting = searching is not None
-    live = hunting
-    asked = False
+    live = hunting and not searching.done
+    paused = False                  # D738: the search's next design waits for the next pass
+    carried = 0                     # D738: the search's designs this pass carries, up to `request.batch`
     step = 0
     started = time.monotonic()
     admitted_before = set(state.admitted)          # D506: what the record gave, before this pass
@@ -359,23 +375,39 @@ def _run_steps(problem: Problem, state: LoopState, searching: Iterator[list[Cand
             if kind == "improve":
                 item = state.improve.pop(0)
                 state.step = step + 1
-                got = _improve_step(problem, state, item)           # its own headline: generation: improve
+                from flux_profile import tagged
+
+                with tagged(part=item.candidate.subgoal):        # D739: under its part
+                    got = _improve_step(problem, state, item)       # its own headline: generation: improve
             elif kind == "batch":
                 # The DSE box, whole (D546, D547): the policy's proposal and the batch through
                 # the gate and first stage, so the generator's own time is attributed here.
                 with _phase("DSE: batch", why="the search policy proposes, the gate and the first stage measure") as out:
-                    batch = _next_batch(searching, got, asked)
-                    asked = True
-                    if batch is None:      # the search is done; any parts left are not
+                    # D738: one pass, one design (or `budget.batch` of them): the search picks
+                    # between passes, from what the last ones measured
+                    batch = searching.take(max(1, int(request.batch or 1) - carried), state)
+                    if not batch and searching.done:   # the search is done; any parts left are not
                         out["candidates"] = "none: the search is done"
                         live = False
+                        state.search_done = True
                         continue           # and this step was not spent
                     out["candidates"] = len(batch)
                     state.step = step + 1
-                    got = _search_step(problem, state, batch)
+                    got = []
+                    try:
+                        got = _search_step(problem, state, batch) if batch else []   # an empty round is a spent step
+                    finally:
+                        searching.measured(got, len(batch))   # D747: also when it failed, or a sibling would wait
+                    state.search_done = searching.done
+                    carried += len(batch)
+                    if carried >= max(1, int(request.batch or 1)) or searching.done:
+                        live = False                   # this pass's designs are in hand
+                        paused = not searching.done    # the search goes on next pass
             else:
                 state.step = step + 1
-                n = min(int(request.parallel_parts or 1), sum(1 for w in waiting if w is not None),
+                from .pool import capped
+
+                n = min(capped(int(request.parallel_parts or 1)), sum(1 for w in waiting if w is not None),   # D740
                         max(1, int(request.steps) - step))                  # never past the budget
                 if n > 1:
                     worked = _parts_step(problem, state, todo, goals, n)   # D569: several parts drafted at once
@@ -389,8 +421,9 @@ def _run_steps(problem: Problem, state: LoopState, searching: Iterator[list[Cand
                 _publish(problem, state, todo, goals, f"after step {state.step}",
                          searching=hunting)
                 _publish_mentor(problem, state)
-        if (not state.improved and not state.pool and not todo and not live
-                and not (set(state.admitted) - admitted_before) and (state.rested or not state.sent_back)):
+        if (not state.improved and not state.pool and not todo and not live and not paused
+                and not (set(state.admitted) - admitted_before) and (state.rested or not state.sent_back)
+                and not getattr(state, "search_done", False)):      # a finished search says so below
             # D506/D518: a pass where every design sent back stood and nothing was admitted, or
             # nothing was sent back at all, changed nothing -- the next would not either: a rest
             state.stopped = (("at rest: every ladder is spent (" + ", ".join(dict.fromkeys(state.rested)) + ")")
@@ -400,7 +433,10 @@ def _run_steps(problem: Problem, state: LoopState, searching: Iterator[list[Cand
             # D608: a search that handed over its last batch says so, so the report does not
             # claim it may have had more to propose
             live = False
-        if getattr(state, "search_done", False) and not todo and not state.improve and not state.stopped:
+        if (getattr(state, "search_done", False) and not todo and not state.improve
+                and state.stopped in (None, "", "nothing left to do")):
+            # D695: a resumed sweep whose points are all on record ends its pass on "nothing left
+            # to do" -- not a rest, so the next pass began at once, and the next: hundreds a minute
             # a search that proposed its last point leaves the next pass nothing to do: at rest,
             # so a campaign with nothing to draft waits instead of re-running the sweep
             state.stopped = "at rest: the search measured every point it had to propose"
@@ -411,7 +447,7 @@ def _run_steps(problem: Problem, state: LoopState, searching: Iterator[list[Cand
                 state.lessons.append(f"[loop] the search used every one of its {request.steps} "
                                      "step(s); the problem may have had more to propose")
     finally:
-        if searching is not None:
+        if searching is not None and searching.done:
             searching.close()
 
 
@@ -570,6 +606,118 @@ def _forget_stale_compositions(state: LoopState) -> None:
     state.fresh = True
 
 
+class _StateProxy:
+    """The pass's state, as a search living across passes sees it (D738): each pass binds its own."""
+
+    def __init__(self, state: LoopState) -> None:
+        object.__setattr__(self, "_state", state)
+
+    def bind(self, state: LoopState) -> None:
+        object.__setattr__(self, "_state", state)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(object.__getattribute__(self, "_state"), name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        setattr(object.__getattribute__(self, "_state"), name, value)
+
+
+_SESSIONS = __import__("threading").Lock()
+
+
+class _SearchSession:
+    """The search across passes (D738). The policy proposes batches as it always did; each pass
+    takes the next `n` points of the current one, and the policy hears the batch's results once
+    all of it is measured -- so a sweep's 6 points are 6 passes, an anneal's temperature and a
+    genetic population carry on, and the decision at each pass's end sees every design so far."""
+
+    def __init__(self, gen: Iterator[list[Candidate]], proxy: _StateProxy, problem: Problem | None = None) -> None:
+        import threading
+
+        self.gen, self.proxy, self.problem = gen, proxy, problem
+        # D747: passes running at once share it -- one takes at a time, and one whose policy
+        # waits for a batch's numbers waits until a sibling has measured its share of it
+        self.lock = threading.Condition()
+        self.queue: list[Candidate] = []
+        self.got: list[Scored] = []
+        self.asked = False
+        self.pending = 0
+        self.ended = False
+        self.last = False                        # the policy said this batch is its last
+        self.run: object | None = None           # the run whose passes share it (passes.carrying)
+
+    def take(self, n: int, state: LoopState | None = None) -> list[Candidate]:
+        with self.lock:
+            while not self.queue and self.pending > 0 and not self.ended:
+                self.lock.wait(timeout=5)                  # a sibling pass is measuring the batch
+            if state is not None:
+                self.proxy.bind(state)                     # the policy speaks to the pass that asks
+            return self._take(n)
+
+    def _take(self, n: int) -> list[Candidate]:
+        if not self.queue and self.pending <= 0 and not self.ended:
+            self.proxy.search_done = False
+            batch = _next_batch(self.gen, self.got, self.asked)
+            self.asked, self.got = True, []
+            if batch is None:
+                self.ended = True
+                return []
+            self.last = bool(getattr(self.proxy, "search_done", False))
+            self.queue, self.pending = list(batch), len(batch)
+        out, self.queue = self.queue[:n], self.queue[n:]
+        if self.problem is not None and out:
+            from .dse import instantiate_taken
+
+            made = instantiate_taken(self.problem, self.proxy, out)   # D739: made when taken
+            self.pending -= len(out) - len(made)                      # a point that could not be made
+            out = made
+        return out
+
+    def measured(self, got: list[Scored], n: int) -> None:
+        with self.lock:
+            self.got.extend(got)
+            self.pending -= n
+            self.lock.notify_all()
+
+    @property
+    def done(self) -> bool:
+        return self.ended or (self.last and not self.queue and self.pending <= 0)
+
+    def close(self) -> None:
+        try:
+            self.gen.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _search_session(problem: Problem, state: LoopState) -> _SearchSession | None:
+    """The problem's search, carried from the last pass (bound to this one's state), or a new
+    one when there was none, it ended, or this is another run (a new run starts it from the
+    record, D682)."""
+    from .passes import this_run
+
+    with _SESSIONS:                                     # D747: passes starting at once make one
+        return _search_session_locked(problem, state, this_run())
+
+
+def _search_session_locked(problem: Problem, state: LoopState, run: object | None) -> _SearchSession | None:
+    session = problem.__dict__.get("_flux_search") if hasattr(problem, "__dict__") else None
+    if session is not None and not session.done and run is not None and session.run is run:
+        session.proxy.bind(state)
+        return session
+    proxy = _StateProxy(state)
+    gen = problem.search(proxy)
+    if gen is None:
+        return None
+    session = _SearchSession(gen, proxy, problem)
+    session.run = run
+    try:
+        problem.__dict__["_flux_search"] = session
+    except Exception:  # noqa: BLE001 -- a problem without a dict: one search per pass, as before
+        pass
+    return session
+
+
 def _next_batch(gen: Iterator[list[Candidate]] | None, got: list[Scored],
                 asked: bool) -> list[Candidate] | None:
     """The generator's next batch, with the last batch's results handed back to it (D446);
@@ -614,6 +762,11 @@ def _search_step(problem: Problem, state: LoopState, batch: list[Candidate]) -> 
     if not stages or not admitted:
         return []
     scored = measure_many(problem, state, admitted, stages[0])
+    if any(s.payload.get("recalled") for s in state.scored):
+        # a point measured again replaces its row from the record (D682), not a second one
+        again = {(s.candidate.name, s.candidate.key(), s.stage) for s in scored}
+        state.scored[:] = [s for s in state.scored if not (s.payload.get("recalled") and
+                           (s.candidate.name, s.candidate.key(), s.stage) in again)]
     state.scored.extend(scored)
     problem.review(stages[0], scored, state)
     _route(problem, state, stages[0], scored)
@@ -684,12 +837,15 @@ def _pick(problem: Problem, state: LoopState, todo: list, goals: list[str], huma
     tag = sg or problem.name
     sub = state.subloops.get(key)
     if sub is not None:
-        _run_child(problem, state, sub, todo)
+        from flux_profile import tagged
+
+        with tagged(part=sg):                     # D739: a child loop is its part's branch
+            _run_child(problem, state, sub, todo)
         return None
     say(f"plan: attempt {tag}" + (f" via {method}" if method else "")
         + (f" ({len(state.admitted)}/{len(goals)} proven)" if goals else ""))
     if key not in state.plans:
-        with _phase(f"propose: brief {tag}", why="once per part") as out:
+        with _phase(f"propose: brief {tag}", why="once per part", part=sg or "") as out:
             try:
                 state.plans[key] = dict(problem.plan_part(sg, state) or {})
                 for k, v in state.plans[key].items():
@@ -793,9 +949,12 @@ def _one_step(problem: Problem, state: LoopState, todo: list, goals: list[str]) 
     if picked is None:
         return
     sg, method = picked
-    cand, built, reason = _draft(problem, state, sg, method, human)
-    state.trying = None
-    _admit(problem, state, todo, goals, sg, cand, built, reason)
+    from flux_profile import tagged
+
+    with tagged(part=sg):                         # D739: the part's work, under its part in the tree
+        cand, built, reason = _draft(problem, state, sg, method, human)
+        state.trying = None
+        _admit(problem, state, todo, goals, sg, cand, built, reason)
 
 
 def _parts_step(problem: Problem, state: LoopState, todo: list, goals: list[str], n: int) -> int:
@@ -816,13 +975,20 @@ def _parts_step(problem: Problem, state: LoopState, todo: list, goals: list[str]
         return 0
     if len(picks) > 1:
         state.say(f"  drafting {len(picks)} parts at once: {', '.join(str(sg or problem.name) for sg, _m in picks)}")
-    drafted = run_parallel(picks, lambda pm: _draft(problem, state, pm[0], pm[1], human), len(picks))
+    from flux_profile import tagged
+
+    def drafted_one(pm: tuple) -> tuple:
+        with tagged(part=pm[0]):                  # D739: each part's work under its part
+            return _draft(problem, state, pm[0], pm[1], human)
+
+    drafted = run_parallel(picks, drafted_one, len(picks))
     state.trying = None
     for (sg, _method), (got, exc) in zip(picks, drafted):
         if exc is not None:
             got = (None, None, f"generator did not run ({exc!s:.160})")
         cand, built, reason = got
-        _admit(problem, state, todo, goals, sg, cand, built, reason)
+        with tagged(part=sg):
+            _admit(problem, state, todo, goals, sg, cand, built, reason)
     return len(picks)
 
 def _climb(problem: Problem, state: LoopState, goals: list[str]) -> None:
@@ -888,8 +1054,22 @@ def _climb(problem: Problem, state: LoopState, goals: list[str]) -> None:
         on_stage[stage] = got
         reached = stage
 
+    # D809: the decision is over every design measured on a stage so far -- this pass's and the
+    # record's, each design's latest -- taken on the deepest stage anything reached: a better
+    # design placed in an earlier pass is not dropped when the cheap stage's finalists move, and a
+    # pass whose deep stage measured nothing does not decide on the cheap stage's numbers
+    pools: dict[str, list[Scored]] = {}
+    for st in stages:
+        latest: dict[str, Scored] = {}
+        for s in state.scored:
+            if s.stage == st:
+                latest.pop(s.candidate.key(), None)
+                latest[s.candidate.key()] = s
+        if latest:
+            pools[st] = list(latest.values())
+            reached = st
     state.reached = reached
-    state.on_stage = on_stage
+    state.on_stage = {**on_stage, **pools}
 
 
 def _calibrate(problem: Problem, state: LoopState, cheap: str, costly: str) -> None:
@@ -995,10 +1175,12 @@ def _conclude(problem: Problem, state: LoopState, goals: list[str]) -> LoopResul
     pool = on_stage.get(reached) or []
     with _phase("frontier", why=f"{len(pool)} on {reached}"):
         front = list(problem.frontier(pool, state))
-    with _phase("decide", why=f"{len(pool)} in the pool"):
+    with _phase("decide", why=f"{len(pool)} in the pool") as out:
         pick, decided_by = problem.decide(pool, state)
         if pick is not None:
             pick, decided_by = _select(problem, state, pool, pick, decided_by)
+        out["decision"] = pick.name if pick is not None else None        # D742: the tree's leaf says it
+        out["decided by"] = decided_by
     if pick is not None:
         state.lessons.append(f"[{pick.stage}] decision {pick.name}: "
                              + ", ".join(f"{k}={v:g}" for k, v in pick.metrics.items())
@@ -1051,6 +1233,7 @@ def _result(problem: Problem, state: LoopState, pick: Scored | None, decided_by:
         not_established=list(state.not_established), notes=notes, stopped=state.stopped,
         at_rest=state.stopped.startswith("at rest"),
         explorable=bool(state.admitted) and any(_can_draft(problem, None if k == "*" else k, state) for k in state.admitted),
+        children=dict(state.children),
         provenance={"problem": problem.name, "measurements": state.tool_runs, "cache_hits": state.cache_hits,
                     "request": {
             k: v for k, v in state.request.__dict__.items()},

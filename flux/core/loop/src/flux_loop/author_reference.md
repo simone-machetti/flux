@@ -9,36 +9,13 @@ agent writes them), gates each one, measures the survivors stage by stage and de
 
 Say only what is yours; the rest is inferred.
 
-- `id` (a short name, letters, digits, `_`) and `statement` (the ask in prose: the model reads
-  it). The record is named by `id`, so an edited document resumes it.
+- `statement` (the ask in prose: the model reads it). The document is `problem.yaml` and has no
+  `id`: the problem's id is its folder's name, which also names its record, so an edited
+  document resumes it.
 - `contract` (optional): rules every candidate must follow, in prose -- ports, naming, what is
   forbidden. The model reads it with the statement.
 - `language`: the artifact's language (`systemverilog`, `verilog`, `python`, `c`, `cpp`,
   `cuda`, `text`, ...); the file extension follows from it.
-- `gate`: how a candidate is refused -- a command (one string, or a list of tokens) that prints
-  `N failing` or exits non-zero. Several checks, cheapest first, as a list:
-  `gate: [{name: lint, run: "flux rtl lint {artifact}"}, {name: golden, run: "flux rtl test {artifact} --golden {home}/golden.py", timeout_s: 120}]`.
-  They run in order; the first that reports failures refuses the design ("failed at lint: ...")
-  and the rest do not run. Exit 3 from any check means the design did not build. Each check may
-  say `count_re` (one integer group) or `fail_re` (one match per failure) for a checker that
-  prints something else, and `timeout_s`. `{build, test}` is the two checks `build` (any
-  non-zero exit: did not build) and `test`.
-- `stages`: the costed measurements, cheapest first, each `{name, command}`. A
-  `flux rtl measure` stage needs nothing more: its metrics and tools are known, and it is
-  skipped where a tool is missing. A command of your own prints `name=value` tokens and says
-  `metrics:` (the names to read) and `needs:` (tools on PATH it requires). Every stage must
-  measure every objective. `timeout_s` optional.
-  A stage's gate is its `cutoff`: go on to the next stage only if `{metric, at: N}` (at least N),
-  `{metric, below: N}` (at most N) or `{metric, within: 0.9}` (within 10% of this run's best).
-  "Timing met" at 1 GHz is `cutoff: {metric: fmax_mhz, at: 1000}`. Several gates are a list,
-  all must pass, in order: `cutoff: [{metric: fmax_mhz, at: 1000}, {metric: area_um2, below: 80}]`.
-  A stage may be estimated before its tool runs (off by default):
-  `estimate: {kind: surrogate|command|model, margin: 0.05}`. A design whose estimate fails the
-  stage's cutoff or an objective's limit by more than `margin` (a fraction of the threshold) is
-  skipped for that stage, and the report counts it; otherwise the tool runs. `surrogate` fits the
-  record's rows on that stage (nothing until 3 are measured); `command: "..."` (kind command
-  only) runs a script with the stage's placeholders that prints the same `name=value` metrics;
-  `model` asks the model with the design and the stage's measured rows (no model, no estimate).
 - `flux tools` lists every check and stage Flux has, with its command and pass rule.
 - `objectives`: a list of `{metric, direction: minimize|maximize, goal: N}`. Every one with a
   `goal` is a limit that must hold (at least N when maximizing, at most N when minimizing);
@@ -49,43 +26,84 @@ Say only what is yours; the rest is inferred.
   the deepest stage (`stage:` names another); a known metric has its unit (`unit:` for one
   Flux does not know). `{keep: 0.9, above: 1.0}` instead of a goal: a limit at 90% of the best
   measured design's gain over 1.0 (the smallest design that stays near the fastest).
-- `knowledge: {files: [...]}`: files the model reads with every prompt (specs, reference code,
-  papers as PDF, notes), paths beside the document. `knowledge: {text: "..."}` for inline notes.
-  The operator's library (`mentor/knowledge/library/`) reaches every document: excerpts for
-  the statement, contract and parts, one line per paper, and the coding agents' briefs.
-  `knowledge: {library: papers}` adds a folder beside the document to it.
-- `space`: knob -> its choices, in a meaningful order, for a design-space exploration. A knob
-  that only matters for some choices of another: `{values: [...], when: {stack: [b, c]}}`;
-  elsewhere it stays at its first choice and is not measured twice.
-  A component groups knobs: `bingo: {region_size: [...], ...}` is `bingo.region_size`; with
-  `optional: true` the search also switches it on or off (`sms.on`), so it picks the combination.
-  A generator reads the whole point from `{point}`, a JSON file with components nested.
-- `seeds`: points measured before the walk, e.g. the shipped defaults, components nested; a knob
-  left out is at its first choice. The first seed is home: a knob that does nothing (its
-  component off) sits at its home value, and starts from it when switched on. A phase's
-  `knobs`, `hold` and `keep` take globs (`bingo.*`, `"*.on"`).
-- `flow`: who fills each box of the loop -- `generate: model` (the default),
-  `generate: {command: "..."}` (a script renders each candidate; with a `space`, once per
-  point, knobs as `{knob}`), `generate: {agent: opencode|claude|codex}` (or `{preset, bin, args}`: another executable, extra
-  arguments such as `[--agent, flux]`; per machine `FLUX_OPENCODE_BIN` / `FLUX_OPENCODE_ARGS`),
-  `dse: sweep|montecarlo|anneal|gradient|genetic|pareto|llm` or a list of phases,
-  `orchestrate: rules|llm|agent`, `plan: llm`, `critique: llm`, `validate: llm`,
-  and on any box but test and the stages, `{agent: opencode|claude|codex}`: a coding agent answers
-  that box, checked by the loop, falling back to the rules half (docs/design-agent-loop.md);
-  `{agent: {preset: opencode, session: pass}}` keeps one agent session per box for the pass
-  (resumed turn after turn), `session: turn` (the default) is a fresh agent every turn. A
-  generate agent's span is fixed, not set: one session per part until the part is admitted
-  (repairs and critique send-backs resume it with a short message; an improve starts fresh;
-  `session` on generate is refused). Also `knowledge: [digest]` (the model's library digest; `none` turns the library off),
-  `extract: mined` (lessons mined from the record), `feedback: none` (no operator notes),
-  `calibrate: off`. `dse: pareto` needs two objectives. `flow` is the only place a box is said:
-  there is no `roles:`, `generator:`, `critique:` or `decompose:` key. A stage's estimate is the
-  stage's `estimate:`, not a `flow` key.
+- `flow`: each box of the loop -- who works it, and its own settings. Every key is optional:
+  - `test`: how a candidate is refused -- a command (one string, or a list of tokens) that
+    prints `N failing` or exits non-zero. Several checks, cheapest first, as a map by name like
+    `measure`: `test: {lint: "flux rtl lint {artifact}", golden: {run: "flux rtl test {artifact} --golden {home}/golden.py", timeout_s: 120}}`.
+    They run in the order written; the first that reports failures refuses the design ("failed at
+    lint: ...") and the rest do not run. Exit 3 from any check means the design did not build. A
+    check is its command, or `{run, count_re, fail_re, timeout_s}`: `count_re` (one integer
+    group) or `fail_re` (one match per failure) for a checker that prints something else. A check
+    named `build` refuses on any non-zero exit (did not build). Never an agent: it establishes the facts.
+  - `measure`: the costed measurements, cheapest first, a map from each stage's name to its
+    command (`screen: flux rtl measure {artifact} --stage synth --clock-ps 1000`) or its
+    settings. A `flux rtl measure` stage needs nothing more: its metrics and tools are known, and
+    it is skipped where a tool is missing. A command of your own prints `name=value` tokens and
+    says `metrics:` (the names to read) and `needs:` (tools on PATH it requires), so it is
+    `bench: {command: "...", metrics: [time_ms]}`. Every stage must measure every objective.
+    `timeout_s` optional.
+    A stage's gate is its `cutoff`: go on to the next stage only if `{metric, at: N}` (at least
+    N), `{metric, below: N}` (at most N) or `{metric, within: 0.9}` (within 10% of this run's
+    best). "Timing met" at 1 GHz is `cutoff: {metric: fmax_mhz, at: 1000}`. Several gates are a
+    list, all must pass, in order: `cutoff: [{metric: fmax_mhz, at: 1000}, {metric: area_um2, below: 80}]`.
+    A stage may be estimated before its tool runs (off by default):
+    `estimate: {kind: surrogate|command|model, margin: 0.05}`. A design whose estimate fails the
+    stage's cutoff or an objective's limit by more than `margin` (a fraction of the threshold) is
+    skipped for that stage, and the report counts it; otherwise the tool runs. `surrogate` fits
+    the record's rows on that stage (nothing until 3 are measured); `command: "..."` (kind command
+    only) runs a script with the stage's placeholders that prints the same `name=value` metrics;
+    `model` asks the model with the design and the stage's measured rows (no model, no estimate).
+  - `orchestrate` with a space (D797) is the search over the design space -- `sweep|montecarlo|anneal|gradient|genetic|pareto|model` (the model proposes points)
+    or a list of phases, or, with its space, `{policy: sweep, space: {...}, seeds: [...]}`.
+    `space`: knob -> its choices, in a meaningful order. A knob that only matters for some
+    choices of another: `{values: [...], when: {stack: [b, c]}}`; elsewhere it stays at its first
+    choice and is not measured twice. A knob whose choices also are files beside the document:
+    `{values: [a, b], from: "out/invented/*.sv"}` -- each file's name is one more choice, read at
+    each load (D798). A component groups knobs: `bingo: {region_size: [...], ...}`
+    is `bingo.region_size`; with `optional: true` the search also switches it on or off (`sms.on`),
+    so it picks the combination. A generator reads the whole point from `{point}`, a JSON file
+    with components nested. `seeds`: points measured before the walk, e.g. the shipped defaults,
+    components nested; a knob left out is at its first choice. The first seed is home: a knob
+    that does nothing (its component off) sits at its home value, and starts from it when
+    switched on. A phase's `knobs`, `hold` and `keep` take globs (`bingo.*`, `"*.on"`).
+    `pareto` needs two objectives.
+  - `orchestrate: {command: "{python} {home}/search.py {history} {state} {params}"}` (D799): a
+    search a command decides, round by round -- it reads `{history}` (what was measured and
+    refused), keeps `{state}`, and prints one JSON object: `candidates` (name, artifact, knobs,
+    why), `lessons`, `not_established`, a `conclusion` (kept when nothing passes), `done`.
+    `{params}` is the document's `params:` as a JSON file, for any command.
+  - `generate`: `model` (the default), `{command: "..."}` (a script renders each candidate; with a
+    space, once per point, knobs as `{knob}`), `{by: opencode|claude|codex}` (with `bin`,
+    `args` beside: another executable, extra arguments such as `[--agent, flux]`; per machine
+    `FLUX_OPENCODE_BIN` / `FLUX_OPENCODE_ARGS`).
+  - `knowledge`: what the model reads with every prompt -- `files: [...]` (specs, reference code,
+    papers as PDF, notes, beside the document), `text: "..."` (inline notes), `by: opencode` (the
+    library's papers digested by that coding agent instead of the model), or `knowledge: off` (no
+    library at all). The operator's library (`mentor/knowledge/library/`) and the loop's own
+    `library/` folder reach every document, each paper digested once: excerpts
+    for the statement, contract and parts, one line per paper, and the coding agents' briefs.
+  - `select: {finalists: N}`: how many designs reach the costliest stage.
+  - `orchestrate: rules|given|model|tools` (`tools`: the model with tools), `plan: model`,
+    `critique: model`, `validate: model`, `knowledge: {lessons: mined}` (lessons mined from the record, or `{lessons: claude}`),
+    `feedback: off` (no operator notes), `calibrate: off`.
+  - Every box says who works it the same way (D795): a word (`rules`, `model`, `off`, ...), an
+    agent's name (`critique: claude`), or `{by: <who>, ...}` with the box's settings and the
+    agent's options beside (`plan: {by: claude, session: pass}`, `select: {by: claude,
+    finalists: 2}`, `knowledge: {by: opencode, files: [...]}`); an agent of your own is
+    `by: {command: [...], output: text}`. A coding agent answers any box but test and measure,
+    checked by the loop, falling back to the rules half (docs/design-agent-loop.md);
+    `session: pass` keeps one agent session per box for the pass
+    (resumed turn after turn), `session: turn` (the default) is a fresh agent every turn. A
+    generate agent's span is fixed, not set: one session per part until the part is admitted
+    (repairs and critique send-backs resume it with a short message; an improve starts fresh;
+    `session` on generate is refused).
+  `flow` is the only place a box is said: there is no top-level `gate:`, `stages:`, `space:`,
+  `seeds:`, `knowledge:`, `roles:`, `generator:`, `critique:` or `decompose:` key.
   `parts: decompose` asks the orchestrator to divide the statement.
 - `budget`, the knobs people change:
   - `steps` (work items per pass), `passes` (a cap; default: until stopped),
-    `repair_attempts` (repairs per draft), `finalists` (how many reach the costliest stage),
-    `workers` (measurements at once; 1 for anything timed).
+    `repair_attempts` (repairs per draft), `workers` (measurements at once; 1 for anything
+    timed).
   - `prototype` (default on with a golden model): the model proves the algorithm first as
     Python `design(**inputs)` against every input, as a formula; the loop then spells it as
     RTL (or, for inputs over 20 bits, the model writes the RTL from it). Leave it on for numeric
@@ -96,18 +114,21 @@ Say only what is yours; the rest is inferred.
   - `prototype_table_max` (64): the largest module-level table, for coefficients only.
     `prototype_cost_max` (2,000, about 650 um2 on ASAP7; -1 for none): a prototype costing
     more is made cheaper first and never synthesised while over it.
-- Advanced `budget` knobs, rarely needed: agent, ahead, budget_s, calibrate, compact,
+- Advanced `budget` knobs, rarely needed: agent, ahead, budget_s, compact,
   compact_share, compute_timeout_s, cooldown_after, critique_rounds, explore, explore_every,
   hop_share, knowledge_share, max_depth, max_tolerance, parallel_parts, patch_context_lines,
   patching, plan_file, prototype_attempts, prototype_attempts_max, prototype_patience,
   prototype_shrink_attempts, prototype_unmeasured_stop, regenerate, regress_after,
   revert_after, screen_only, structured, tool_hops, tool_result_chars, tools.
-- Advanced keys: `parts` and `max_parts` (pieces of one artifact) and `subtasks`/`split`/`joiner`/
-  `max_subtasks` (child documents, each its own loop), `world`/`params`/`hooks` (a Python
-  package for what a document cannot say), `ladder`, `cache`, `skills`, `brief`, `workload`.
+- Advanced keys: `parts` (pieces of one artifact: their names in order, `[decoder, datapath]`,
+  or a map from each name to what it is, `{decoder: "...", datapath: "..."}`, or `decompose`),
+  `subtasks` (child problems, each its own loop: folders beside the document, `[ops/recip, ops/exp]`,
+  each folder's `problem.yaml` saying only what differs -- its `flow`, `budget` and `params` merge key
+  by key over the parent's, so a child that says `test:` keeps the parent's stages; the parent's
+  `generate: {command: "... {parts} {artifact}"}` composes their answers into the whole, D801), `params` (the document's settings, any command reads them as `{params}`), `ladder`, `skills`, `workload`.
 
 Placeholders in any command: `{artifact}` (the candidate's file), `{home}` (the document's
-directory), `{workdir}`, `{name}`, `{python}`, and `{knob}` for each knob of `space`. A command
+directory), `{workdir}`, `{name}`, `{python}`, and `{knob}` for each knob of `flow.orchestrate.space`. A command
 starting with `flux` runs this Flux.
 
 ## The RTL tools

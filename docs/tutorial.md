@@ -13,10 +13,10 @@ pre-written rules:
 
 | role | what a model can do there | how you turn it on |
 |---|---|---|
-| generator | write each design, repair it from the failures, make it cheaper | `flow: {generate: model}` (the default), or `{agent: opencode}` |
+| generator | write each design, repair it from the failures, make it cheaper | `flow: {generate: model}` (the default), or `{by: opencode}` |
 | orchestrator | pick the next piece of work, with its reasons on the record | `--agent orchestrate`, or `flow: {orchestrate: agent}` |
-| planner | write the plan of a pass: parts, order, method, budgets | `--agent plan`, or `flow: {plan: llm}` |
-| search | propose the next points of a knob space from what was measured | `flow: {dse: llm}`, or a `llm` phase |
+| planner | write the plan of a pass: parts, order, method, budgets | `--agent plan`, or `flow: {plan: model}` |
+| search | propose the next points of a knob space from what was measured | `flow: {orchestrate: {by: model}}`, or a `model` phase |
 
 With `--agent tools`, a model turn can also call tools inside the turn: run Python, run the
 problem's own check on a draft, read the history. Two things are never handed to a model: the
@@ -66,7 +66,7 @@ inputs and compares each output.
 ## 3. Say what you want: the problem document
 
 ```yaml
-id: isqrt
+# isqrt/problem.yaml -- the folder's name is the problem's id
 statement: >-                     # the ask, in words: the model reads it
   A combinational integer square root in SystemVerilog: module `isqrt`, input `x` (16 bits,
   unsigned), output `r` (8 bits), r = floor(sqrt(x)). As fast as possible on ASAP7, then as
@@ -77,19 +77,20 @@ contract: >-                      # the rules every design must follow
 
 language: systemverilog
 
-gate: flux rtl test {artifact} --golden {home}/golden.py   # refuses a wrong design first
+flow:
 
-stages:                           # measurement, cheapest first
-  - name: screen                  # Yosys synthesis: seconds
-    command: flux rtl measure {artifact} --stage synth --clock-ps 1000
-  - name: confirm                 # OpenROAD placement: the numbers the report quotes
-    command: flux rtl measure {artifact} --stage place --clock-ps 1000
+  test: flux rtl test {artifact} --golden {home}/golden.py   # refuses a wrong design first
+
+  measure:                           # measurement, cheapest first
+    screen: flux rtl measure {artifact} --stage synth --clock-ps 1000  # Yosys synthesis: seconds
+    confirm: flux rtl measure {artifact} --stage place --clock-ps 1000  # OpenROAD placement: the numbers the report quotes
+  select: {finalists: 2}
 
 objectives:                       # a goal first, then what to minimise among those that meet it
   - {metric: fmax_mhz, direction: maximize, goal: 1000}
   - {metric: area_um2, direction: minimize}
 
-budget: {steps: 3, repair_attempts: 6, finalists: 2}
+budget: {steps: 3, repair_attempts: 6}
 ```
 
 Everything else is inferred: the file extension from `language`, the record's name from `id`,
@@ -104,7 +105,7 @@ bit. Asking a model for that RTL directly rarely passes. Every key a document ma
 ## 4. Check it
 
 ```bash
-flux task check isqrt/isqrt.problem.yaml
+flux task check isqrt
 ```
 
 It lists the parts, the roles you can switch, the stages and their tools, and the model it
@@ -114,7 +115,7 @@ something no stage measures.
 ## 5. Run it
 
 ```bash
-flux task run isqrt/isqrt.problem.yaml --passes 3 --agent tools --json answer.json
+flux task run isqrt --passes 3 --agent tools --json answer.json
 ```
 
 Without `--passes` a run goes on until you stop it (Ctrl-C, `flux stop`, or `q` in `--tui`).
@@ -152,12 +153,13 @@ Each of these is one flag or one line; mix them.
 
 - **Let a model steer the work:** `--agent orchestrate` (or `flow: {orchestrate: agent}`). The
   model reads the standings and the record with tools, picks the next step, and records why.
-- **Let a model plan each pass:** `--agent plan` (or `flow: {plan: llm}`): the parts, the order,
+- **Let a model plan each pass:** `--agent plan` (or `flow: {plan: model}`): the parts, the order,
   the method to try first, the budgets. It is checked against the problem before it applies.
-- **Hand the writing to a coding agent:** `flow: {generate: {agent: opencode}}` (or `claude`,
-  `codex`). With `prototype: true` the agent writes the Python prototype and runs
-  `flux rtl proto` on it itself; the loop still writes the RTL and runs the gate.
-- **Give it knowledge:** `knowledge: {files: [method-note.md]}`: a method, measured facts, a
+- **Hand the writing to a coding agent:** `flow: {generate: {by: opencode}}` (or `claude`,
+  `codex`). The agent writes; the loop runs the gate and brings failures back to it. With
+  `prototype: true` the agent writes the Python prototype, which the loop checks with
+  `flux rtl proto` before it writes the RTL.
+- **Give it knowledge:** `flow.knowledge: {files: [method-note.md]}`: a method, measured facts, a
   paper. Not a design. `applications/gelu_fp16/` shows a method note for a hard function.
 - **Steer it while it runs:** type a note in the TUI (`f`); it reaches the next prompt.
 
@@ -167,23 +169,23 @@ When the designs come from parameters rather than from a model, declare the knob
 search policy. A script writes each point, and the gate and the stages judge it as before:
 
 ```yaml
-space:
-  arch: [ripple, carry_select, kogge_stone]
-  block: [2, 4, 8]
 flow:
   generate: {command: "{python} {home}/gen.py {artifact} {arch} {block}"}
-  dse:
+  orchestrate:
+    space:
+      arch: [ripple, carry_select, kogge_stone]
+      block: [2, 4, 8]
     - {name: coarse, policy: sweep, knobs: [arch]}              # every architecture
     - {name: fine, policy: gradient, hold: [arch], steps: 10}   # then tune the block size
-    - {name: ideas, policy: llm, rounds: 2}                     # then a model proposes points
-budget: {steps: 12}                # every batch is a step: enough for all three phases
+    - {name: ideas, policy: model, rounds: 2}                     # then a model proposes points
+budget: {steps: 12}  # every batch is a step: enough for all three phases
 ```
 
 On the `rtl-sweep` template (its knobs are `arch` and `chunk`) with 12 steps, `coarse` swept
 the architectures, `fine` moved `chunk` and raised fmax from 3,166 to 3,577 MHz, then `ideas`
 asked the model. With the template's `steps: 1` only the first phase runs.
 `flux new NAME --kind rtl-sweep` starts from this shape. The policies are `sweep`,
-`gradient`, `anneal`, `genetic`, `montecarlo`, `pareto` and `llm`. The
+`gradient`, `anneal`, `genetic`, `montecarlo`, `pareto` and `model` (the model proposes). The
 [cookbook](cookbook.md) says which suits which space.
 
 ## 9. Other kinds of problem
@@ -196,4 +198,4 @@ asked the model. With the template's `steps: 1` only the first phase runs.
 | only a description and some files | `flux ask "what you want" --file spec.pdf` |
 | an accelerator architecture for a workload | `applications/npu_gemm/`: a script writes the architecture, ZigZag measures it |
 
-For a search policy, a checker or a whole world of your own, see [extending.md](extending.md).
+For a search policy, a checker or a search command of your own, see [extending.md](extending.md).

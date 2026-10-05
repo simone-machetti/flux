@@ -10,20 +10,15 @@ Commands carry placeholders: `{artifact}` (the candidate written to a file), `{w
 exit with nothing counted is one failure. Exit 3 means the candidate did not build (D594): a
 build failure, not a score, so "best so far" is always a design that compiles.
 
-A world (D519), `world: package.module:World`, supplies what a document cannot say in prose
-or numbers (toolkit, transpiler, exhaustive judge, composition, measurement): a callable that
-takes the problem and returns an object whose methods are bound as `Problem` hooks.
-`hooks: {name: module:callable}` replaces one hook with a callable taking the problem first.
-The document still owns parts, objectives, ladder, stages (a stage with no command and no
-evaluator is the world's; `needs:` names required tools on PATH, else it is skipped),
-knowledge, budget and the world's `params:`; the record is named by the id.
+What a document cannot say in prose or numbers is a command beside it -- a search, a check,
+a stage, a composition (D798-D803); `needs:` names a stage's tools on PATH, else it is
+skipped; `params:` reach any command as `{params}`. The record is named by the id.
 """
 
 from __future__ import annotations
 
 import json
 import re
-import shlex
 import shutil
 import sys
 import time
@@ -41,8 +36,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from .roles import Roles
 from .gradient import CHECK_WEIGHT
 from .document import (BUILD_FAILED, Part, TaskError, TaskSpec, _digest_of, _flux_rtl_tools,
-                        _knob_subs, _leaf, _point_name, _rig_for, _write_point, _substitute, contract_lines, describe_flow, loop_owned,
-                        resolve, world_hooks)
+                        _knob_subs, _leaf, _point_name, _rig_for, _write_point, _substitute, describe_flow)
 
 __all__ = ["PromptProblem", "model_use", "task_report_lines"]
 
@@ -84,23 +78,6 @@ class PromptProblem(Problem):
         self._children: tuple[TaskSpec, ...] | None = None
         self._roles = _rig_for(task, roles)
         self._caller_roles = roles                     # caller overrides reach the children (D555)
-        #: The world's object of hooks (D519), or None for a document that runs on its own.
-        self.world: Any = None
-        if task.world:
-            self.world = resolve(task.world)(self)
-            owned = loop_owned()
-            taken = sorted(n for n in owned if callable(getattr(self.world, n, None)) and n in type(self.world).__dict__)
-            if taken:
-                raise TaskError(f"world {task.world}: {', '.join(taken)} is the loop's, not a world's hook (D561); "
-                                "a world fills the contract: " + "; ".join(contract_lines()))
-            for name in world_hooks():
-                fn = getattr(self.world, name, None)
-                if callable(fn):
-                    setattr(self, name, fn)
-        import functools
-
-        for name, spec in task.hooks.items():
-            setattr(self, name, functools.partial(resolve(spec, f"hooks.{name}"), self))
         from .skills import load_skills, skill_index
 
         self._skills = load_skills(list(task.skills)) if task.skills else []
@@ -123,14 +100,7 @@ class PromptProblem(Problem):
         """The document's skills (D588): what the `skill` tool loads and the agents receive."""
         return list(self.__dict__.get("_skills") or [])
 
-    def __getattr__(self, name: str) -> Any:
-        """Fall back to the world's attributes (D519), so its own state is reachable here."""
-        world = self.__dict__.get("world")
-        if world is None or name.startswith("__"):
-            raise AttributeError(name)
-        return getattr(world, name)
-
-    # ---- what the document says, and what the world fills (D519)
+    # ---- what the document says
     def ladder(self):
         """The document's `ladder:` (D517): true is the default ladder, an object its fields."""
         doc = self.task.ladder
@@ -143,18 +113,13 @@ class PromptProblem(Problem):
         return Ladder(**{k: tuple(v) if isinstance(v, list) else v for k, v in doc.items()})
 
     def prototype(self):
-        """The world's prototype stage (D515), using this problem's own check when one was put
-        on the instance (D516); otherwise the loop's skeleton runs the world's judge."""
-        world = self.__dict__.get("world")
-        proto = getattr(world, "prototype", None)
-        cap = proto() if callable(proto) else None
-        if cap is None and world is None:
-            # a gate that names a golden model gives any document the prototype stage (D604)
-            if "_golden_cap" not in self.__dict__:
-                from .golden_proto import capability
+        """The prototype stage (D604): a gate that names a golden model gives a document one,
+        using this problem's own check when one was put on the instance (D516)."""
+        if "_golden_cap" not in self.__dict__:
+            from .golden_proto import capability
 
-                self.__dict__["_golden_cap"] = capability(self.task)
-            return self.__dict__["_golden_cap"]
+            self.__dict__["_golden_cap"] = capability(self.task)
+        cap = self.__dict__["_golden_cap"]
         own = self.__dict__.get("prototype_check")
         if cap is not None and own is not None and cap.check is None:
             return replace(cap, check=own)
@@ -518,7 +483,7 @@ class PromptProblem(Problem):
                         f"objective {objective.metric!r} names a metric no stage "
                         f"measures (this task measures: "
                         f"{', '.join(sorted(produced)) or 'nothing'})")
-        if self.task.stages and not unknown and not self.task.world:
+        if self.task.stages and not unknown:
             # each stage ranks its own rows by the objectives (D351): a stage that lacks one has
             # no front, so nothing climbs from it and nothing is decided on it (D625)
             wanted = [o.metric for o in self.task.objectives]
@@ -547,9 +512,6 @@ class PromptProblem(Problem):
 
     def _tools_missing(self) -> list[str]:
         missing: list[str] = []
-        world_missing = getattr(self.__dict__.get("world"), "tools_missing", None)
-        if callable(world_missing):
-            missing.extend(world_missing())
         declared = {f"stage {r.name}" for r in self.task.stages if r.needs}   # skipped, not missing
         for _label, cmd in self.task.commands():
             head = _substitute(cmd[:1], {"python": sys.executable, "home": self.task.home or "."})[0]
@@ -572,7 +534,9 @@ class PromptProblem(Problem):
 
             role = self.roles().knowledge
             self._mentor = role
-            folders = (self.task.library,) if self.task.library else ()
+            from .document import library_folders
+
+            folders = library_folders(self.task)          # D735: the loop's own papers too
             if library_on(self.task) and (role is None or hasattr(role, "sources")):
                 from flux_knowledge import Library, Mentor, Papers
                 from flux_knowledge.library import library_files
@@ -580,9 +544,65 @@ class PromptProblem(Problem):
                 if library_files(folders):
                     lib = [Library(lambda _s: library_queries(self.task, self.parts), folders=folders),
                            Papers(folders=folders)]
+                    from .document import own_library
+
+                    own = own_library(self.task)
+                    from flux_knowledge import Digest
+
+                    rest = [x for x in getattr(role, "sources", ()) if type(x).__name__ != "Digest"]
+                    # D791: the whole library -- the shared papers and the loop's own, its own first --
+                    # digested whenever the library is on, by the model or `flow.knowledge.agent`;
+                    # D793: only for a loop that reads them -- a sweep with no model has no prompt
+                    if model_use(self.task) or self.task.digest_by is not None:
+                        lib.append(Digest(folders=folders, whole=True, own=own))
                     self._mentor = (Mentor(lib) if role is None else
-                                    Mentor([*lib, *role.sources], budget=role.budget, share=role.share))
+                                    Mentor([*lib, *rest], budget=role.budget, share=role.share))
         return self._mentor
+
+    def versions(self) -> dict[str, str]:
+        """D778: a document's judge, as a version (D510) -- its gate (`flow.test`), the files beside
+        it the gate names (a golden model, a checker), the measuring tools and this Flux. A design
+        admitted under the same judge is kept as it stands at a reload; any of them changed, it is
+        re-verified once and recorded again. A world's own `versions` replaces this one."""
+        if "_judge" not in self.__dict__:
+            import hashlib
+
+            from flux_evaluator_abi import toolchain_fingerprint
+
+            from .provenance import git_revision
+
+            gate = (self.task.to_dict().get("flow") or {}).get("test")
+            home = Path(self.task.home) if self.task.home else None
+            files = {}
+            for rel in sorted(set(re.findall(r"\{home\}/([^\s\"']+)", json.dumps(gate, default=str)))):
+                path = home / rel if home is not None else None
+                files[rel] = (hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+                              if path is not None and path.is_file() else "missing")
+            said = json.dumps({"gate": gate, "files": files, "tools": toolchain_fingerprint(), "flux": git_revision()},
+                              sort_keys=True, default=str)
+            self._judge = hashlib.sha256(said.encode()).hexdigest()[:16] if gate else ""
+        return {"judge": self._judge} if self._judge else {}
+
+    def digesting(self) -> bool:
+        """Whether this loop digests papers at all (D771): its own, or the library's by `flow.knowledge`."""
+        return any(type(x).__name__ == "Digest" for x in getattr(self.knowledge(), "sources", ()))
+
+    def digest(self, state: LoopState) -> dict[str, Any]:
+        """D771: the papers not digested yet, digested in the run's Setup -- by its model, or by
+        the coding agent `knowledge: {digest: {agent: …}}` names, which reads each file itself.
+        What was done, for the task pane; {} when the loop digests nothing."""
+        mentor = self.knowledge()
+        sources = [x for x in getattr(mentor, "sources", ()) if type(x).__name__ == "Digest"]
+        if not sources:
+            return {}
+        ask = _agent_digest(self.task.digest_by) if self.task.digest_by is not None else None
+        out: dict[str, Any] = {}
+        for src in sources:
+            if ask is not None:
+                src.ask = ask
+            for k, v in src.make_now(state).items():
+                out[k] = (out[k] + v) if isinstance(v, int) and isinstance(out.get(k), int) else v
+        return out
 
     def mentor_sections(self, state: LoopState) -> list[tuple[str, str]]:
         out = [("task", self.task.statement + ("\n\n" + self.task.contract if self.task.contract else ""))]
@@ -756,58 +776,6 @@ class PromptProblem(Problem):
             self._remember_division(state)
         return Verdict(ok, 0.0 if ok else 1.0, why, {"issues": issues})
 
-    def plan_part(self, subgoal: str | None, state: LoopState) -> dict[str, Any]:
-        """The part's brief (D432): with `"brief": "propose"` the model writes it and may set the
-        repair budget (clamped to twice the request's). Remembered for resume; empty with no
-        model."""
-        t = self.task
-        if not t.brief:
-            return {}
-        key = subgoal or "*"
-        records = state.records
-        earlier = [d for d in (records.recall("brief") if records is not None else [])
-                   if d.get("part") == key]
-        if earlier:
-            state.say(f"brief for {subgoal or t.id}: resumed from the record")
-            return {k: v for k, v in earlier[-1].items() if k in ("brief", "repair_attempts")}
-        if state.proposer is None:
-            return {}
-        from .model import _ask, _json
-
-        part = self._part(subgoal)
-        gate = t.gate.line()
-        prompt = "\n\n".join(x for x in (
-            f"TASK {t.id}: {t.statement}",
-            f"PART {part.name}: {part.statement}" if part is not None else "",
-            f"CONTRACT:\n{t.contract}" if t.contract else "",
-            f"KNOWLEDGE:\n{t.knowledge}" if t.knowledge else "",
-            f"HOW IT IS JUDGED: the gate runs `{gate}` and counts failures; zero admits." if gate else "",
-            "You are briefing the writer of this part. Write a BRIEF of at most 12 lines: exactly "
-            "what the part must contain, the constraints most likely to be missed, what the gate "
-            "will check, and the smallest correct approach. Do not write the part itself. Then "
-            f"say how many repair attempts it deserves (1 to {2 * state.request.repair_attempts}; "
-            f"{state.request.repair_attempts} is the default).",
-            'Reply with ONLY JSON: {"brief": "<text>", "repair_attempts": <int>, "why": "<one line>"}',
-        ) if x)
-        schema = {"type": "object",
-                  "properties": {"brief": {"type": "string"},
-                                 "repair_attempts": {"type": "integer", "minimum": 1},
-                                 "why": {"type": "string"}},
-                  "required": ["brief"]}
-        doc = _json(_ask(state, prompt, schema).text)
-        if not isinstance(doc, dict) or not isinstance(doc.get("brief"), str) or not doc["brief"].strip():
-            state.say(f"brief for {subgoal or t.id}: the reply carried no brief; the statement is the brief")
-            return {}
-        plan: dict[str, Any] = {"brief": doc["brief"].strip()[:2000]}
-        ra = doc.get("repair_attempts")
-        if isinstance(ra, int) and ra > 0:
-            plan["repair_attempts"] = max(1, min(ra, 2 * state.request.repair_attempts))
-        if records is not None:
-            records.remember("brief", {"part": key, **plan, "why": str(doc.get("why") or "")[:200]})
-        state.say(f"brief for {subgoal or t.id}: {len(plan['brief'].splitlines())} line(s)"
-                  + (f", {plan['repair_attempts']} repair attempts" if "repair_attempts" in plan else ""))
-        return plan
-
     def _check_decomposition(self, doc: Any) -> str:
         if not isinstance(doc, dict) or not isinstance(doc.get("parts"), list) or not doc["parts"]:
             return "the reply carried no parts"
@@ -897,7 +865,19 @@ class PromptProblem(Problem):
     def _run(self, cmd: tuple[str, ...], subs: dict[str, str], timeout_s: float, what: str):
         from flux_evaluator_abi.tools import run_tool
 
-        return run_tool(_substitute(cmd, subs), cwd=subs["workdir"], timeout_s=timeout_s, what=what)
+        if any("{params}" in t for t in cmd) and "params" not in subs:
+            subs = {**subs, "params": self._params_file(subs.get("workdir") or ".")}   # D799
+
+        who = subs.get("name") or ""                   # D709: the task says which candidate
+        return run_tool(_substitute(cmd, subs), cwd=subs["workdir"], timeout_s=timeout_s,
+                        what=f"{what} {who}" if who and who not in what else what)
+
+    def _params_file(self, workdir: str) -> str:
+        """`{params}` (D799): the document's `params:` as a JSON file a command reads."""
+        path = Path(workdir) / "params.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self.task.params, indent=1, default=str))
+        return str(path)
 
     def _gate_run(self, subs: dict[str, str]) -> tuple[int, str]:
         """The gate's checks in order (D652): (score, report) of the first that fails, the checks
@@ -984,7 +964,8 @@ class PromptProblem(Problem):
         to resume, the full brief carries the prior draft and the failure."""
         from dataclasses import asdict
 
-        from .agent import agent_brief, converse, library_section
+        from .agent import DENIED, agent_brief, converse, library_section, workbench_link, workbench_section
+        from .probe import probe_context, probe_line
 
         state = attempt.state
         sg = attempt.subgoal
@@ -995,6 +976,7 @@ class PromptProblem(Problem):
         safe = re.sub(r'[^A-Za-z0-9_.-]+', '_', name)
         path = workdir / f"draft-{re.sub(r'[^A-Za-z0-9_.-]+', '_', sg or _leaf(self.task.id))}{self.task.extension}"
         prior, failure = attempt.prior, attempt.failure
+        budget = dict(agent.probe) if agent.probe is not None else None          # D678
         if prior is None and (sg or "*") in state.best:
             # a part the gate refused or the critic sent back on an earlier step (D669)
             _score, prior, failure = state.best[sg or "*"]
@@ -1002,30 +984,32 @@ class PromptProblem(Problem):
             body, _schema = self.rewrite_prompt(sg, prior, failure, state)
         else:
             body, _schema = self.design_prompt(sg, "", state, None, prior, failure)
-        gate = self.task.gate                          # the agent can run the gate it is judged by (D595)
-        check_subs = {"artifact": str(path), "workdir": str(workdir), "name": name, "part": sg or "",
-                      "python": sys.executable, "home": str(Path(self.task.home or ".").resolve())}
-        check = " && ".join(shlex.join(_substitute(c.run, check_subs)) for c in gate)
         brief = agent_brief(body=body, prefix=self.prompt_prefix(sg, state) or "", artifact=path, workdir=workdir,
                             language=self.task.language or "text", part=sg or self.task.id,
                             prior=prior.artifact if prior is not None else None, failure=failure,
-                            questions=agent.questions, check=check,
-                            library=library_section(self, library_queries(self.task, [p for p in self.parts if p.name == sg]), state))
+                            questions=agent.questions,
+                            library=library_section(self, library_queries(self.task, [p for p in self.parts if p.name == sg]), state),
+                            workbench=workbench_section(self.task.workbench),
+                            probes=probe_line([s.name for s in self.task.stages], budget, allowed=agent.allowed),
+                            denied=set(agent.allowed) < set(DENIED))
+        workbench_link(self.task.workbench, workdir)
+        probe_ctx = probe_context(self.task, workdir, sg or "", budget)
         resume = sess.id if agent.resume and sess.id and prior is not None and failure else None
         message = ""
         if resume:
             # the session holds the brief: what failed, the file, fix it (D669)
             path.write_text(prior.artifact)
-            message = (f"YOUR DRAFT WAS REFUSED:\n{failure.strip()[:4000]}\n\nThe refused draft is in `{path}`. "
-                       f"Fix that file in place (or rewrite it if the approach is wrong)"
-                       + ("; run the gate command from the brief again until it reports no failures. " if check else ". ")
+            message = (f"THE LOOP RAN YOUR DRAFT AND REFUSED IT:\n{failure.strip()[:4000]}\n\nThe refused draft is in "
+                       f"`{path}`. Fix that file in place (or rewrite it if the approach is wrong)"
+                       + ("; `flux probe` has a new budget for this turn. " if budget is not None else ". ")
                        + "Then reply with one line saying the file is written.\n")
         else:
             path.unlink(missing_ok=True)               # a fresh session creates the file
         prompt_file = workdir / f"PROMPT-{safe}.md"
         prompt_file.write_text(message or brief)
         subs = {"prompt": brief, "prompt_file": str(prompt_file), "artifact": str(path), "workdir": str(workdir),
-                "part": sg or "", "name": name, "python": sys.executable, "home": self.task.home or "."}
+                "part": sg or "", "name": name, "python": sys.executable, "home": self.task.home or ".",
+                "workbench": self.task.workbench, "probe": probe_ctx}
         if self.skill_list() and not resume:           # install skills where the agent looks (D588)
             from .skills import install
 
@@ -1035,7 +1019,7 @@ class PromptProblem(Problem):
                                answer=self._agent_answerer(agent, brief, state), say=state.say,
                                session=resume, message=message)
         self._session_turn(state, sess, turn, "generate", sg, agent.tool, path.is_file(),
-                           f"exited {turn.rc}, wrote no {path.name}", message or brief, t0)
+                           f"exited {turn.rc}, wrote no {path.name}", message or brief, t0, probe_ctx)
         knobs = {"task": self.task.id, "part": sg or "", "generator": f"agent:{agent.tool}"}
         meta = {"questions": [asdict(e) for e in asked]} if asked else {}
         if path.is_file():
@@ -1053,17 +1037,27 @@ class PromptProblem(Problem):
                       + (f": {tail}" if tail else ""))
 
     def _session_turn(self, state: LoopState, sess: Any, turn: Any, kind: str, sg: str | None, tool: str,
-                      ok: bool, why: str, sent: str, t0: float) -> None:
-        """The session after an agent turn (D669): its id kept, the turn said and on the record."""
+                      ok: bool, why: str, sent: str, t0: float, probe_ctx: str = "") -> None:
+        """The session after an agent turn (D669): its id kept, the turn said and on the record,
+        with the probes it ran (D678)."""
         from .boxes import record_turn
+        from .probe import probes_done
 
         sess.id = turn.session or sess.id
         sess.turns += 1
         state.say(f"  {kind} {sg or self.task.id}: agent {tool}, {turn.began} session"
                   + (f" {sess.id}" if sess.id else "") + f", turn {sess.turns}, {len(sent)} chars sent")
+        probes = probes_done(probe_ctx)
+        if probes:
+            by: dict[str, int] = {}
+            for p in probes:
+                by[p["key"]] = by.get(p["key"], 0) + 1
+            state.say(f"  {kind} {sg or self.task.id}: the agent probed " + ", ".join(f"{k} x{n}" for k, n in by.items())
+                      + f"; last: {probes[-1].get('result', '')[:120]}")
         record_turn(state, {"box": kind, "part": sg or "", "agent": tool, "ok": ok, "why": "" if ok else why,
                             "seconds": round(time.monotonic() - t0, 1), "session": turn.began,
-                            "session_id": sess.id or "", "message_chars": len(sent)})
+                            "session_id": sess.id or "", "message_chars": len(sent),
+                            **({"probes": probes} if probes else {})})
 
     def prototype_agent(self) -> Any | None:
         """The coding agent that writes the prototype (D618), when `flow.generate: {agent: ...}`
@@ -1079,11 +1073,13 @@ class PromptProblem(Problem):
 
     def prototype_agent_turn(self, agent: Any, prompt: str, code: str | None, failure: str,
                              subgoal: str | None, state: LoopState) -> str:
-        """One agent turn on the prototype (D618): it edits a file and runs `flux rtl proto` (the
-        stage's own check) until it passes. Returns the file as a `{"prototype": ...}` reply,
-        or "" when nothing new was written."""
-        from .agent import agent_brief, converse, library_section
+        """One agent turn on the prototype (D618): it edits a file; the loop runs the stage's own
+        check (`flux rtl proto`) and comes back with what failed (D673). Returns the file as a
+        `{"prototype": ...}` reply, or "" when nothing new was written."""
+        from .agent import DENIED, agent_brief, converse, library_section, workbench_link, workbench_section
+        from .document import _command
         from .golden_proto import TABLE_MAX, golden_path
+        from .probe import probe_context, probe_line
 
         sess = self._part_session(state, subgoal, "prototype", agent.tool)       # D669: until the prototype passes
         workdir = sess.workdir
@@ -1094,34 +1090,40 @@ class PromptProblem(Problem):
             path.write_text(code)
         else:
             path.unlink(missing_ok=True)
-        from .document import _command
-
-        check = shlex.join(_substitute(_command(
-            ["flux", "rtl", "proto", str(path), "--golden", str(golden_path(self.task)),
+        budget = dict(agent.probe) if agent.probe is not None else None          # D678: the prototype's check
+        proto = list(_substitute(_command(
+            ["flux", "rtl", "proto", "{artifact}", "--golden", str(golden_path(self.task)),
              "--table-max", str(int(self.task.budget.get("prototype_table_max") or TABLE_MAX))], "the prototype check") or (),
             {"python": sys.executable}))
         brief = agent_brief(body=prompt, prefix="", artifact=path, workdir=workdir, language="Python",
                             part=f"{subgoal or self.task.id} (the prototype `design(...)`)", prior=None,
-                            failure=failure, questions=agent.questions, check=check,
-                            library=library_section(self, library_queries(self.task, [p for p in self.parts if p.name == subgoal]), state))
+                            failure=failure, questions=agent.questions,
+                            library=library_section(self, library_queries(self.task, [p for p in self.parts if p.name == subgoal]), state),
+                            workbench=workbench_section(self.task.workbench),
+                            probes=probe_line([], budget, proto=True, allowed=agent.allowed),
+                            denied=set(agent.allowed) < set(DENIED))
+        workbench_link(self.task.workbench, workdir)
+        probe_ctx = probe_context(self.task, workdir, subgoal or "", budget, proto=proto)
         resume = sess.id if agent.resume and sess.id and code else None
         message = ""
         if resume:
             # the session holds the brief: what the check said, the file, fix it (D669)
-            message = (f"YOUR PROTOTYPE WAS REFUSED:\n{(failure or 'see the check').strip()[:4000]}\n\nIt is in `{path}`. "
-                       f"Edit it there (or rewrite it if the approach is wrong) and run the check command from the brief "
-                       f"again until it reports 0 failing. Then reply with one line saying the file is written.\n")
+            message = (f"THE LOOP RAN YOUR PROTOTYPE AND REFUSED IT:\n{(failure or 'see the check').strip()[:4000]}\n\n"
+                       f"It is in `{path}`. Edit it there (or rewrite it if the approach is wrong)"
+                       + ("; `flux probe gate` has a new budget for this turn. " if budget is not None else ". ")
+                       + "Then reply with one line saying the file is written.\n")
         prompt_file = workdir / f"PROMPT-{safe}.md"
         prompt_file.write_text(message or brief)
         subs = {"prompt": brief, "prompt_file": str(prompt_file), "artifact": str(path), "workdir": str(workdir),
-                "part": subgoal or "", "name": safe, "python": sys.executable, "home": self.task.home or "."}
+                "part": subgoal or "", "name": safe, "python": sys.executable, "home": self.task.home or ".",
+                "workbench": self.task.workbench, "probe": probe_ctx}
         t0 = time.monotonic()
         turn, _asked = converse(agent, subs, workdir=workdir, artifact=path, prompt_file=prompt_file,
                                 answer=self._agent_answerer(agent, brief, state), say=state.say,
                                 session=resume, message=message)
         text = path.read_text() if path.is_file() else ""
         self._session_turn(state, sess, turn, "prototype", subgoal, agent.tool, bool(text.strip()) and text != code,
-                           f"exited {turn.rc}, left no new {path.name}", message or brief, t0)
+                           f"exited {turn.rc}, left no new {path.name}", message or brief, t0, probe_ctx)
         if not text.strip() or (code and text == code):
             tail = ((turn.text or turn.stdout or "") + "\n" + (turn.stderr or "")).strip()[-400:]
             state.say(f"  prototype {subgoal or self.task.id}: the coding agent {agent.tool} exited {turn.rc} "
@@ -1139,6 +1141,9 @@ class PromptProblem(Problem):
                 import time
 
                 state.say(f"QUESTION from the coding agent (answer at the prompt line within {agent.wait_s:.0f}s):\n{question}")
+                from flux_profile import mark
+
+                mark("question", json.dumps({"question": question, "wait_s": agent.wait_s, "asked": time.time()}))   # D684
                 until = time.monotonic() + agent.wait_s
                 while time.monotonic() < until:
                     before = len(state.human_notes)
@@ -1172,6 +1177,8 @@ class PromptProblem(Problem):
         from .sources import from_file
 
         self._count += 1
+        if isinstance(item, str) and self.task.home and not Path(item).is_absolute():
+            item = str(Path(self.task.home) / item)            # D801: beside the document that names it
         cand, why = from_file(item, attempt,
                               name=f"{_leaf(self.task.id)}#{self._count}")
         if cand is None:
@@ -1286,8 +1293,10 @@ class PromptProblem(Problem):
             ordered = [admitted[n] for n in names if n in admitted]
             if not ordered or len(ordered) != len(names):
                 return None
-            return Candidate(self.task.id, self.task.joiner.join(c.artifact for c in ordered),
-                             knobs={"task": self.task.id, "subtasks": names})
+            command = (self.task.generator or {}).get("command")
+            if command:                                 # D801: the parent's generate composes them
+                return self._composed(dict(zip(names, ordered)), tuple(command), state)
+            return None                                 # D802: no generate, no whole -- each is its own answer
         if not self.parts:
             return super().compose(admitted, state)
         ordered = [admitted[p.name] for p in self.parts if p.name in admitted]
@@ -1295,6 +1304,29 @@ class PromptProblem(Problem):
             return None
         return Candidate(self.task.id, self.task.joiner.join(c.artifact for c in ordered),
                          knobs={"task": self.task.id, "parts": [c.name for c in ordered]})
+
+    def _composed(self, parts: dict[str, Candidate], command: tuple[str, ...], state: LoopState) -> Candidate | None:
+        """The whole, as the parent's `generate: {command}` writes it from its sub-loops'
+        decisions (D801): `{parts}` is a JSON file of each part's name and the path of its
+        artifact; the command writes `{artifact}`."""
+        workdir = Path(state.workdir or ".") / "compose"
+        workdir.mkdir(parents=True, exist_ok=True)
+        files = {}
+        for name, cand in parts.items():
+            f = workdir / f"{re.sub(r'[^A-Za-z0-9_.-]+', '_', name)}{self.task.extension}"
+            f.write_text(cand.artifact)
+            files[name] = str(f)
+        (workdir / "parts.json").write_text(json.dumps(files, indent=1))
+        path = workdir / f"{_leaf(self.task.id)}{self.task.extension}"
+        path.unlink(missing_ok=True)
+        subs = {"artifact": str(path), "workdir": str(workdir), "name": _leaf(self.task.id), "parts": str(workdir / "parts.json"),
+                "part": "", "python": sys.executable, "home": self.task.home or ".", "point": ""}
+        run = self._run(command, subs, self.task.gate.timeout_s, "generate: compose")
+        if not run.ok or not path.is_file():
+            tail = ((run.stdout or "") + "\n" + (run.stderr or "")).strip()[-300:]
+            state.not_established.append(f"the parts were not composed: the generate command exited {run.returncode}: {tail}")
+            return None
+        return Candidate(self.task.id, path.read_text(), knobs={"task": self.task.id, "subtasks": list(parts)})
 
     def cutoff(self, stage: str, scored, state):
         """The stage's declared cutoff (D454): a floor, a budget or a band around this run's best,
@@ -1446,11 +1478,29 @@ class PromptProblem(Problem):
         return rules
 
     def cache_suffix(self) -> str | None:
-        """The document's `cache:` (D541): the loop's sidecar, none, or a name."""
-        cache = self.task.cache
-        if cache is False:
-            return None
-        return cache if isinstance(cache, str) else f"{self.task.id}.json"
+        """The loop's measurement cache (D541, D790): always on, beside the record."""
+        return f"{self.task.id}.json"
+
+    def cache_key(self, cand: Candidate, stage: str, state: LoopState) -> str:
+        """What makes a measurement the same one (D567, D790): the candidate, and what measures
+        it -- the stage's command or evaluator, the files under `{home}` the command names, the
+        document's params and workload. A changed clock, script or parameter measures again; a
+        world with its own key replaces this."""
+        import hashlib
+
+        spec = next((r for r in self.task.stages if r.name == stage), None)
+        if spec is None:
+            return cand.key()
+        h = hashlib.sha256(json.dumps([list(spec.command or ()), spec.evaluator or "", sorted(spec.metrics),
+                                       self.task.params, self.task.workload], sort_keys=True, default=str).encode())
+        home = self.task.home
+        for token in spec.command or ():
+            if home and "{home}/" in token:
+                f = Path(token.split("{home}/", 1)[1].split()[0].replace("{home}", home))
+                f = f if f.is_absolute() else Path(home) / f
+                if f.is_file():
+                    h.update(f.read_bytes())
+        return f"{cand.key()}@{h.hexdigest()[:16]}"
 
 
 def _document(text: str) -> Any:
@@ -1512,14 +1562,17 @@ def task_report_lines(task: TaskSpec, out: Any, problem: Any = None) -> list[str
     if d is not None:
         metrics = ", ".join(f"{k}={v:g}" for k, v in d.metrics.items())
         lines.append(f"  DECISION {d.name} [{d.stage}; {out.decided_by}]" + (f": {metrics}" if metrics else ""))
+    elif getattr(out, "children", None):            # D802: a parent of sub-loops that composes no whole
+        lines.append(f"  DECISIONS, one per sub-loop ({sum(1 for c in out.children.values() if c.decision)} of {len(out.children)})")
+        for name, child in out.children.items():
+            cd = child.decision
+            if cd is None:
+                lines.append(f"    {name:<12} decided nothing")
+            else:
+                metrics = ", ".join(f"{k}={v:g}" for k, v in cd.metrics.items())
+                lines.append(f"    {name:<12} {cd.name} [{cd.stage}; {child.decided_by}]" + (f": {metrics}" if metrics else ""))
     else:
         lines.append("  NO CANDIDATE SURVIVED -- see NOT ESTABLISHED below")
-    report = getattr(getattr(problem, "world", None), "report", None)
-    if callable(report):
-        try:
-            lines.extend(report(out))
-        except Exception as exc:  # noqa: BLE001
-            lines.append(f"  (the world's report could not be made: {exc!s:.120})")
     pool = out.confirmed or out.frontier
     if len(pool) > 1:
         lines.append(f"  frontier ({len(pool)} point(s)):")
@@ -1550,14 +1603,14 @@ def task_report_lines(task: TaskSpec, out: Any, problem: Any = None) -> list[str
 
 def model_use(task: "TaskSpec") -> str:
     """Why this document needs a model, or "" when it does not (D608), so a banner names a
-    model only when one is used. A world may call one in ways the document does not show."""
-    if task.world:
-        return "its world may ask one"
+    model only when one is used."""
     flow = dict(task.flow or {})
     gen = dict(task.generator or {})
     reasons = []
-    if not gen and not task.space:
-        reasons.append("it writes the candidates")
+    searched = flow.get("dse")
+    by_command = isinstance(searched, dict) and "command" in searched     # D799: the command writes them
+    if not gen and not task.space and not by_command and not task.subtasks and not task.split:
+        reasons.append("it writes the candidates")                   # D801: sub-loops write their own
     phases = flow.get("dse")
     specs = phases if isinstance(phases, list) else [phases] if phases else []
     if any((s if isinstance(s, str) else (s or {}).get("policy", "")) in ("llm", "model") for s in specs):
@@ -1570,3 +1623,39 @@ def model_use(task: "TaskSpec") -> str:
     if orch in ("llm", "model", "agent") or (isinstance(orch, dict) and set(orch) & {"llm", "model", "agent"}):
         reasons.append(f"the orchestrator is the {orch if isinstance(orch, str) else next(iter(orch))}")
     return "; ".join(reasons)
+
+
+def _agent_digest(spec: Any):
+    """D771: `ask(path, prompt, text) -> (digest, by)` -- one coding agent turn per paper, in a
+    scratch directory of its own. D785: the paper's text is a file there (`paper.txt`) the agent
+    reads with its tools, in pieces as it needs, not the brief itself -- a paper's 30,000 tokens
+    overflowed a model's context; the brief is the instructions and where the original is."""
+    import shutil
+    import tempfile
+
+    from .agent import agent_spec, run_turn
+
+    agent = agent_spec(spec)
+
+    def ask(path: str, prompt: str, text: str = "") -> tuple[str, str]:
+        work = Path(tempfile.mkdtemp(prefix="flux-digest-"))
+        try:
+            how = prompt.split("\nDOCUMENT `", 1)[0].strip().replace("the document below", "the document")   # no text
+            if text:
+                (work / "paper.txt").write_text(text)
+            brief = ((f"The document is `paper.txt` in your working directory: the text of {path}. Read it with "
+                      "your tools, in parts if it is long; open the original file for a table or a figure the text garbles. "
+                      if text else f"The document is the file {path}: read it with your tools. ")
+                     + "Do not write any file and call no tool to answer: reply with the key points as plain text.\n\n" + how)
+            (work / "BRIEF.md").write_text(brief)
+            subs = {"prompt": brief, "prompt_file": str(work / "BRIEF.md"), "artifact": str(work / "digest.md"),
+                    "workdir": str(work), "part": "digest", "name": f"digest {Path(path).name}", "home": str(work)}
+            turn = run_turn(agent, agent.argv, subs, workdir=work)
+            if not turn.ok:                       # D782: an agent that says why on stdout (OpenCode) is heard too
+                said = " ".join((turn.stderr or "").split())[-300:] or " ".join((turn.stdout or "").split())[-300:]
+                raise RuntimeError(f"{agent.tool} exited {turn.rc}: {said or 'nothing said'}")
+            return turn.text, f"{agent.tool}" + (f" ({turn.about})" if turn.about else "")
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    return ask

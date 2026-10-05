@@ -5,7 +5,8 @@
    from. The words mirror flux_loop/document.py (DOCUMENT_KEYS, FLOW_BOXES,
    _FLOW_WORDS, EXTENSIONS), flux_loop/boxes.py (DELEGABLE, NEVER) and the registered DSE
    policies; flux/tests/unit/test_loop_crafter.py loads what this writes with the real loader.
-   The page wiring (`mount`) is at the bottom and only runs in a browser. */
+   The page wiring (`mount`) is at the bottom and only runs in a browser; on a page with a
+   `#flux-loop-drawing` (guide/loop-shape.md) it draws the loop alone, at its defaults. */
 (function (root) {
   "use strict";
 
@@ -17,12 +18,12 @@
   /** The registered DSE policies a document names by word (dse.py), and the model's half. */
   var DSE_POLICIES = ["sweep", "montecarlo", "anneal", "gradient", "genetic", "pareto"];
   /** boxes.py: the boxes a coding agent may answer, and the ones that never are. */
-  var DELEGABLE = ["validate", "orchestrate", "plan", "dse", "generate", "critique", "extract", "select"];
+  var DELEGABLE = ["validate", "orchestrate", "plan", "dse", "generate", "critique", "lessons", "select"];
   var NEVER = ["test", "calibrate"];
   /** The boxes a document may say a half for, in flow order (document.py FLOW_BOXES, less the
       ones the loop no longer takes as settings: analytical, simulation, records). */
   var FLOW_BOXES = ["validate", "orchestrate", "plan", "dse", "generate", "test", "critique", "calibrate",
-                    "select", "feedback", "knowledge", "extract"];
+                    "select", "feedback", "knowledge"];
   var BUILTIN_SUBS = ["artifact", "workdir", "name", "part", "python", "home", "failure", "attempt",
                       "prompt", "prompt_file", "point"];
 
@@ -37,17 +38,17 @@
   var BOXES = {
     validate: { title: "Check the document", says: "Before anything runs, the document is read for mistakes.",
       choices: [{ value: "rules", half: "rules", label: "Built-in checks" },
-                { value: "llm", half: "model", label: "Built-in checks, then a model reads it and objects" }]
+                { value: "model", half: "model", label: "Built-in checks, then a model reads it and objects" }]
         .concat(agentChoices("A coding agent reads the document and objects")) },
     orchestrate: { title: "Pick the next job", says: "Decides what to work on next.",
       choices: [{ value: "default", half: "model", label: "Standard: the model picks the next part, rules pick the kind of work" },
                 { value: "rules", half: "rules", label: "Rules only" },
-                { value: "llm", half: "model", label: "A model picks" },
-                { value: "agent", half: "model", label: "A model with tools picks" }]
+                { value: "model", half: "model", label: "A model picks" },
+                { value: "tools", half: "model", label: "A model with tools picks" }]
         .concat(agentChoices("A coding agent picks")) },
     plan: { title: "Plan the round", says: "Optionally writes a plan for the round before any work starts.",
-      choices: [{ value: "none", half: "rules", label: "No plan: step by step" },
-                { value: "llm", half: "model", label: "A model writes the plan" }]
+      choices: [{ value: "off", half: "rules", label: "No plan: step by step" },
+                { value: "model", half: "model", label: "A model writes the plan" }]
         .concat(agentChoices("A coding agent writes the plan")) },
     dse: { title: "Search the settings", says: "Walks the list of settings (the space) to choose which to try.",
       choices: [{ value: "none", half: "off", label: "No search" }]
@@ -56,7 +57,7 @@
             anneal: "Annealing", gradient: "Step towards better", genetic: "Genetic (breed the best)",
             pareto: "Trade-off front" }[p] + " (" + p + ")" };
         }))
-        .concat([{ value: "llm", half: "model", label: "A model proposes settings" }])
+        .concat([{ value: "model", half: "model", label: "A model proposes settings" }])
         .concat(agentChoices("A coding agent proposes settings")) },
     generate: { title: "Make a design", says: "Writes each candidate design.",
       choices: [{ value: "model", half: "model", label: "A model writes it" },
@@ -66,8 +67,8 @@
       fixed: "Configured in the Checks list above.",
       choices: [{ value: "gate", half: "fixed", label: "Your checks (fixed)" }] },
     critique: { title: "Second opinion", says: "Optionally, a critic questions the division into parts, each admitted part (sending it back) and the final choice.",
-      choices: [{ value: "none", half: "off", label: "No critic" },
-                { value: "llm", half: "model", label: "A model critic" }]
+      choices: [{ value: "off", half: "off", label: "No critic" },
+                { value: "model", half: "model", label: "A model critic" }]
         .concat(agentChoices("A coding agent critic")) },
     measure: { title: "Measure", says: "Runs your measurements, cheapest first; a design that fails a gate is dropped.",
       fixed: "Configured in the Measurements list above (each may estimate first).",
@@ -78,12 +79,18 @@
       choices: [{ value: "objectives", half: "rules", label: "By the goals" }]
         .concat(agentChoices("By the goals; a coding agent breaks ties")) },
     feedback: { title: "Your notes", says: "Notes you type while it runs steer the next round.",
-      choices: [{ value: "human", half: "rules", label: "Take my notes" }, { value: "none", half: "off", label: "No notes" }] },
+      choices: [{ value: "human", half: "rules", label: "Take my notes" }, { value: "off", half: "off", label: "No notes" }] },
     knowledge: { title: "Background reading", says: "What the model reads with every request.",
       choices: [{ value: "default", half: "rules", label: "The library (on), and the files I list" },
                 { value: "none", half: "off", label: "None: no library" }] },
-    extract: { title: "Learn from results", says: "Optionally turns past results into lessons for the next round.",
-      choices: [{ value: "none", half: "off", label: "No lessons" },
+    // D784, D791: who sums the papers up, once each, in each pass's Setup -- always, while the
+    // library is on; not a flow key of its own: an agent is written as flow.knowledge.agent
+    digest: { title: "Digest the papers", says: "Each paper of the library (library/ beside the document, and the shared one) is summed up once, in the Setup, and the summaries reach every prompt.",
+      choices: [{ value: "model", half: "model", label: "The model sums up each paper" }]
+        .concat(agentChoices("A coding agent reads each paper (its tables and figures too) and sums it up")) },
+    // D796: the record's lessons, written into flow.knowledge as `lessons:` -- not a flow key of its own
+    lessons: { title: "Learn from results", says: "Optionally turns past results into lessons for the next round, read with the library.",
+      choices: [{ value: "off", half: "off", label: "No lessons" },
                 { value: "mined", half: "rules", label: "Lessons mined from the results" }]
         .concat(agentChoices("A coding agent writes lessons from the results")) },
     records: { title: "Keep a record", says: "Every design, measurement and refusal is kept, and read back when you resume.",
@@ -96,6 +103,8 @@
   function defaultFlow() {
     var out = {};
     FLOW_BOXES.forEach(function (b) { out[b] = BOXES[b].choices[0].value; });
+    out.digest = "model";                                // D784: a box of the drawing, written into knowledge
+    out.lessons = "off";                                 // D796: likewise, as knowledge.lessons
     return out;
   }
 
@@ -107,20 +116,20 @@
     var v = ((state || {}).flow || {})[box];
     var parts = state && (state.partsMode === "decompose" || (state.partsMode === "list" && list(state.parts).length > 0));
     var words = {
-      validate: { rules: "the loader's checks", llm: "the loader's checks, then the model reads the document and objects, D556" },
+      validate: { rules: "the loader's checks", model: "the loader's checks, then the model reads the document and objects, D556" },
       orchestrate: { "default": parts ? "the model picks the next part, the first one waiting without a model; " + KIND_OF_WORK
                                       : "one design, no part to pick; " + KIND_OF_WORK,
                      rules: "the first part waiting, no model; " + KIND_OF_WORK,
-                     llm: "the model picks the next part; " + KIND_OF_WORK,
-                     agent: "the model with tools picks the next part and the kind of work, its reasons on the record, D505" },
-      plan: { none: "the orchestrator picks step by step" },
+                     model: "the model picks the next part; " + KIND_OF_WORK,
+                     tools: "the model with tools picks the next part and the kind of work, its reasons on the record, D505" },
+      plan: { off: "the orchestrator picks step by step" },
       dse: { none: "the world's own search, if it has one" },
       generate: { model: "the prototype stage, transpile, repair" },
-      critique: { llm: "a model adversary on the division, each admitted part and the decision" },
+      critique: { model: "a model adversary on the division, each admitted part and the decision" },
       calibrate: { on: "between every pair of stages, on the record" },
-      feedback: { human: "the operator's notes, when a terminal is attached", none: "no notes are read, reloaded or waited for" },
-      knowledge: { "default": "on by default; `knowledge: none` turns it off", none: "the library is off" },
-      extract: { none: "nothing is mined from the record", mined: "facts mined from the record reach the prompts" },
+      feedback: { human: "the operator's notes, when a terminal is attached", off: "no notes are read, reloaded or waited for" },
+      knowledge: { "default": "on by default, its papers digested; `flow.knowledge: off` turns it off", none: "the library is off" },
+      lessons: { off: "nothing is mined from the record", mined: "facts mined from the record reach the prompts" },
       records: { on: "every candidate, measurement and refusal, read back on resume" },
     }[box] || {};
     if (box === "records") v = "on";
@@ -153,6 +162,7 @@
     if (box === "orchestrate" && state.flow && state.flow.dse && state.flow.dse !== "none") return "off";
     if (!BOXES[box] || isFixed(box)) return "fixed";
     var c = choiceOf(box, v);
+    if (!c && typeof v === "string" && v.indexOf("agent:") === 0) return "agent";          // a custom agent (D728)
     return c ? c.half : "rules";
   }
 
@@ -217,6 +227,17 @@
     }
     var first = names[0].length > max - 5 ? names[0].slice(0, max - 6) + "\u2026" : names[0];
     return names.length > 1 ? first + " +" + (names.length - 1) : first;
+  }
+
+  /** The tool a new measurement starts with: the first made for this language that is not used
+      yet (Yosys alone reports no fmax, so it comes after the tools that time), else custom. */
+  function nextStageTool(lang, used, cat) {
+    var ids = stageTools(cat).map(function (x) { return x[0]; }).filter(function (id) {
+      var t = toolOf(id, cat);
+      return t && !isCustom(id) && lang && (t.languages || []).indexOf(lang) >= 0 && (used || []).indexOf(id) < 0;
+    });
+    ids.sort(function (a, b) { return (a === "rtl-stat") - (b === "rtl-stat"); });
+    return ids[0] || "custom-stage";
   }
 
   function checkType(key) { for (var i = 0; i < CHECK_TYPES.length; i++) if (CHECK_TYPES[i].key === key) return CHECK_TYPES[i]; return null; }
@@ -364,9 +385,10 @@
       if (o.label === "atleast") r = { metric: m, direction: "maximize", goal: num(o.value) };
       else if (o.label === "atmost") r = { metric: m, direction: "minimize", goal: num(o.value) };
       else if (o.label === "min") r = { metric: m, direction: "minimize" };
-      else if (o.label === "balance") r = { metric: m, direction: naturalDirection(m), balance: true };
+      else if (o.label === "balance") r = { metric: m, direction: o.direction || naturalDirection(m), balance: true };
       else r = { metric: m, direction: "maximize" };
-      if (!UNITS[m] && unitFor(m, cat)) r.unit = unitFor(m, cat);
+      if (o.unit && o.unit !== UNITS[m]) r.unit = o.unit;            // a unit the document said (D686)
+      else if (!UNITS[m] && unitFor(m, cat)) r.unit = unitFor(m, cat);
       return r;
     });
   }
@@ -394,7 +416,7 @@
       id: "", statement: "", contract: "", language: "", languageOther: "", knowledgeFiles: "",
       checks: [], stages: [], objectives: [],
       flow: defaultFlow(), generateCommand: "",
-      budget: { steps: "", passes: "", repair_attempts: "", finalists: "", workers: "", prototype: "" },
+      budget: { steps: "", passes: "", parallel: "", batch: "", repair_attempts: "", finalists: "", workers: "", prototype: "" },
       space: [], partsMode: "none", parts: "",
     };
   }
@@ -501,16 +523,19 @@
       }
       return { name: String(st.name || "").trim() || "stage" + (i + 1), command: cmd, shape: shape, tool: st.tool, reports: rep,
                metrics: write ? rep : [], needs: needs, gates: gates, estimate: estimateOf(st),
-               clock_ps: t && t.params && "clock_ps" in t.params ? paramValue(t, "clock_ps", st.params.clock_ps, auto) : null };
+               clock_ps: t && t.params && "clock_ps" in t.params ? paramValue(t, "clock_ps", st.params.clock_ps, auto) : null,
+               timeout: String(st.timeout || "").trim() };
     });
     return { checks: checks, stages: stages, objectives: objectives, document: docKeys };
   }
 
-  function flowValue(state, box) {
+  /** A box's value as the document holds it (D775: written into `flow` with its settings). */
+  function flowObj(state, box) {
     var v = state.flow[box];
-    if (typeof v === "string" && v.indexOf("agent:") === 0) return "{agent: " + v.slice(6) + "}";
-    if (box === "generate" && v === "command") return "{command: " + JSON.stringify(String(state.generateCommand || "").trim()) + "}";
-
+    var raw = state.agentRaw && state.agentRaw[box];
+    if (raw && typeof v === "string" && v.indexOf("agent:") === 0) return raw;      // D728: as written
+    if (typeof v === "string" && v.indexOf("agent:") === 0) return { agent: v.slice(6) };
+    if (box === "generate" && v === "command") return { command: String(state.generateCommand || "").trim() };
     return v;
   }
 
@@ -523,6 +548,7 @@
       if (v === undefined || v === BOXES[b].choices[0].value) return false;
       if (b === "orchestrate" && flow.dse && flow.dse !== "none") return false;
       if (NEVER.indexOf(b) >= 0 && String(v).indexOf("agent:") === 0) return false;
+      if (state.agentRaw && state.agentRaw[b] && String(v).indexOf("agent:") === 0) return true;   // its own settings (D728)
       return !!choiceOf(b, v);
     });
   }
@@ -543,68 +569,27 @@
     return flowMap(p);
   }
 
-  /** The problem document for `state`, as the text of a `.problem.yaml`. */
+  /** The problem document for `state`, as the text of a `problem.yaml` (D786: in a folder named by its id). */
   function buildYaml(state, cat) {
     var r = resolve(state, cat);
+    var kept = state.kept || [];                     // kept as written: the server appends them (D686)
+    function own(key) { return kept.indexOf(key) < 0; }
     var id = String(state.id || "").trim() || "my_problem";
-    var out = "# " + id + ": made with the Flux problem builder.\n" +
-              "#     flux task check " + id + ".problem.yaml\n" +
-              "#     flux task run " + id + ".problem.yaml --passes 1\n\n";
-    out += "id: " + q(id) + "\n";
+    // D786: the document is the folder's problem.yaml; the folder's name is the id, not said here
+    var out = "# " + id + "/problem.yaml: made with the Flux problem builder.\n" +
+              "#     flux task check " + id + "\n" +
+              "#     flux task run " + id + "            # until stopped; --passes N for N\n\n";
     out += prose("statement", String(state.statement || "").trim() || "(say what you want made)");
     if (String(state.contract || "").trim()) out += prose("contract", state.contract);
     if (language(state, true)) out += "language: " + q(language(state, true)) + "\n";
 
-    var kfiles = list(state.knowledgeFiles);
-    if (kfiles.length) out += "\nknowledge:\n  files: " + flowSeq(kfiles) + "\n";
-
-    if (state.partsMode === "decompose") out += "\nparts: decompose\n";
+    if (!own("parts")) { /* kept */ }
+    else if (state.partsMode === "decompose") out += "\nparts: decompose\n";
     else if (state.partsMode === "list" && list(state.parts).length) out += "\nparts: " + flowSeq(list(state.parts)) + "\n";
 
-    var space = (state.space || []).filter(function (x) { return String(x.knob || "").trim() && list(x.choices).length; });
-    if (space.length) {
-      out += "\nspace:\n";
-      space.forEach(function (x) { out += "  " + q(x.knob.trim()) + ": " + flowSeq(list(x.choices).map(typed)) + "\n"; });
-    }
+    for (var dk in r.document) if (own(dk)) out += "\n" + q(dk) + ": " + inline(r.document[dk][0].value, false) + "\n";   // an evaluator's own keys
 
-    for (var dk in r.document) out += "\n" + q(dk) + ": " + inline(r.document[dk][0].value, false) + "\n";   // an evaluator's own keys
-
-    var said = flowSaid(state);
-    if (said.length) {
-      out += "\nflow:\n";
-      said.forEach(function (b) { out += "  " + b + ": " + flowValue(state, b) + "\n"; });
-    }
-
-    var checks = r.checks.filter(function (c) { return c.run; });
-    if (checks.length) {
-      out += "\ngate:                       # each must pass, in order\n";
-      checks.forEach(function (c) {
-        var p = [["name", c.name], ["run", c.run]];
-        if (c.count_re) p.push(["count_re", c.count_re]);
-        if (c.timeout) p.push(["timeout_s", typed(c.timeout)]);
-        out += "  - " + flowMap(p) + "\n";
-      });
-    }
-
-    if (r.stages.length) {
-      out += "\nstages:                     # cheapest first\n";
-      r.stages.forEach(function (st) {
-        out += "  - name: " + q(st.name) + "\n";
-        if (st.shape) for (var key in st.shape) out += "    " + q(key) + ": " + inline(st.shape[key], false) + "\n";
-        else out += "    command: " + q(st.command || "(the command)") + "\n";
-        if (st.metrics.length) out += "    metrics: " + flowSeq(st.metrics) + "\n";
-        if (st.needs.length) out += "    needs: " + flowSeq(st.needs) + "\n";
-        if (st.estimate) {
-          var ep = [["kind", st.estimate.kind], ["margin", st.estimate.margin === null ? "?" : st.estimate.margin]];
-          if (st.estimate.kind === "command") ep.push(["command", st.estimate.command || "(the command)"]);
-          out += "    estimate: " + flowMap(ep) + "\n";                 // estimated first; a likely failure is skipped
-        }
-        if (st.gates.length === 1) out += "    cutoff: " + gateMap(st.gates[0]) + "\n";   // go on only if
-        else if (st.gates.length > 1) out += "    cutoff: [" + st.gates.map(gateMap).join(", ") + "]\n";
-      });
-    }
-
-    if (r.objectives.length) {
+    if (r.objectives.length && own("objectives")) {
       out += "\nobjectives:                 # limits must hold; the rest decide, in order\n";
       r.objectives.forEach(function (o) {
         var p = [["metric", o.metric], ["direction", o.direction]];
@@ -616,12 +601,98 @@
     }
 
     var b = state.budget || {}, bp = [];
-    ["steps", "passes", "repair_attempts", "finalists", "workers"].forEach(function (key) {
+    ["steps", "passes", "parallel", "batch", "repair_attempts", "workers"].forEach(function (key) {
       var v = String(b[key] || "").trim();
       if (v !== "") bp.push([key, typed(v)]);
     });
     if (b.prototype) bp.push(["prototype", typed(b.prototype)]);
-    if (bp.length) out += "\nbudget: " + flowMap(bp) + "\n";
+    if (bp.length && own("budget")) out += "\nbudget: " + flowMap(bp) + "\n";
+
+    // D775: the flow, last -- who works each box, and each box's own settings beside it
+    var F = [], kf = state.keptFlow || {}, said = flowSaid(state), boxesKept = !own("flow.boxes");
+    var kb = boxesKept ? (kf["flow.boxes"] || {}) : null, SPECIAL = ["dse", "knowledge", "select"];
+    var boxVal = function (bx) { return boxesKept ? kb[bx] : said.indexOf(bx) >= 0 ? flowObj(state, bx) : undefined; };
+    (boxesKept ? Object.keys(kb) : said).forEach(function (bx) {
+      if (SPECIAL.indexOf(bx) < 0) F.push("  " + q(bx) + ": " + inline(boxesKept ? boxVal(bx) : toSurface(bx, boxVal(bx)), false));
+    });
+
+    // dse: its policy or agent, the space it searches, where it starts
+    var dv = boxesKept ? boxVal("dse") : toSurface("dse", boxVal("dse")), D = [];
+    var space = (state.space || []).filter(function (x) { return String(x.knob || "").trim() && list(x.choices).length; });
+    if (!own("flow.dse.space")) { if (kf["flow.dse.space"] !== undefined) D.push("    space: " + inline(kf["flow.dse.space"], false)); }
+    else if (space.length) {
+      D.push("    space:");
+      space.forEach(function (x) { D.push("      " + q(x.knob.trim()) + ": " + flowSeq(list(x.choices).map(typed))); });
+    }
+    if (kf["flow.dse.seeds"] !== undefined) D.push("    seeds: " + inline(kf["flow.dse.seeds"], false));
+    if (D.length) {
+      F.push("  orchestrate:                # a search: the points it tries (D797)");
+      if (dv && typeof dv === "object" && !Array.isArray(dv)) Object.keys(dv).forEach(function (k) { F.push("    " + q(k) + ": " + inline(dv[k], false)); });
+      else if (dv !== undefined) F.push("    policy: " + inline(dv, false));
+      F = F.concat(D);
+    } else if (dv !== undefined) F.push("  orchestrate: " + inline(dv, false));
+
+    // test: the checks, in order
+    var checks = r.checks.filter(function (c) { return c.run; });
+    if (!own("flow.test")) { if (kf["flow.test"] !== undefined) F.push("  test: " + inline(kf["flow.test"], false)); }
+    else if (checks.length) {
+      F.push("  test:                     # by name; each must pass, in order");
+      checks.forEach(function (c) {
+        var p = [["run", c.run]];
+        if (c.count_re) p.push(["count_re", c.count_re]);
+        if (c.timeout) p.push(["timeout_s", typed(c.timeout)]);
+        F.push("    " + q(String(c.name || "test").trim() || "test") + ": " + (p.length === 1 ? q(c.run) : flowMap(p)));
+      });
+    }
+
+    // measure: each stage by its name, cheapest first
+    if (!own("flow.measure")) {
+      var km = kf["flow.measure"];
+      if (km && typeof km === "object") { F.push("  measure:"); Object.keys(km).forEach(function (n) { F.push("    " + q(n) + ": " + inline(km[n], false)); }); }
+    } else if (r.stages.length) {
+      F.push("  measure:                  # cheapest first");
+      r.stages.forEach(function (st) {
+        var L = [];
+        if (st.shape) for (var key in st.shape) L.push(q(key) + ": " + inline(st.shape[key], false));
+        else L.push("command: " + q(st.command || "(the command)"));
+        if (st.metrics.length) L.push("metrics: " + flowSeq(st.metrics));
+        if (st.needs.length) L.push("needs: " + flowSeq(st.needs));
+        if (st.estimate) {
+          var ep = [["kind", st.estimate.kind], ["margin", st.estimate.margin === null ? "?" : st.estimate.margin]];
+          if (st.estimate.kind === "command") ep.push(["command", st.estimate.command || "(the command)"]);
+          L.push("estimate: " + flowMap(ep));                // estimated first; a likely failure is skipped
+        }
+        if (st.timeout) L.push("timeout_s: " + scalar(typed(st.timeout)));
+        if (st.gates.length === 1) L.push("cutoff: " + gateMap(st.gates[0]));   // go on only if
+        else if (st.gates.length > 1) L.push("cutoff: [" + st.gates.map(gateMap).join(", ") + "]");
+        if (L.length === 1 && L[0].indexOf("command: ") === 0) F.push("    " + q(st.name) + ": " + L[0].slice(9));
+        else { F.push("    " + q(st.name) + ":"); L.forEach(function (l) { F.push("      " + l); }); }
+      });
+    }
+
+    // knowledge: what is read, and who digests it
+    if (!own("flow.knowledge")) { if (kf["flow.knowledge"] !== undefined) F.push("  knowledge: " + inline(kf["flow.knowledge"], false)); }
+    else {
+      var kv = boxVal("knowledge"), K = {}, kfiles = list(state.knowledgeFiles);
+      if (kfiles.length) K.files = kfiles;
+      var dg = (state.flow || {}).digest;                  // D784, D791: the Digest box -- the model unless an agent
+      if (typeof dg === "string" && dg.indexOf("agent:") === 0) K.by = dg.slice(6);
+      var ls = (state.flow || {}).lessons;                 // D796: the Learn box
+      if (ls && ls !== "off") K.lessons = typeof ls === "string" && ls.indexOf("agent:") === 0 ? { by: ls.slice(6) } : ls;
+      if (kv === "none" || kv === "off") K = K.lessons ? { off: true, lessons: K.lessons } : { off: true };
+      if (Object.keys(K).length === 1 && K.off) F.push("  knowledge: off");
+      else if (Object.keys(K).length) F.push("  knowledge: " + inline(K, false));
+    }
+
+    // select: how many reach the last stage, and who chooses
+    var sv = boxVal("select"), S = sv && typeof sv === "object" && !Array.isArray(sv) ? Object.assign({}, sv) : {};
+    var fin = String(b.finalists || "").trim();
+    if (fin !== "") S.finalists = typed(fin);
+    if (!boxesKept) S = toSurface("select", S);                          // D795: {by: claude, finalists: 2}
+    if (typeof S === "string" || Object.keys(S).length) F.push("  select: " + inline(S, false));
+    else if (sv !== undefined) F.push("  select: " + inline(boxesKept ? sv : toSurface("select", sv), false));
+
+    if (F.length) out += "\nflow:\n" + F.join("\n") + "\n";
     return out;
   }
 
@@ -660,7 +731,8 @@
     }
 
     // the checks
-    if (!r.checks.length) error("Add a check: a design that fails it goes no further.");
+    var kept = state.kept || [];
+    if (!r.checks.length && kept.indexOf("flow.test") < 0) error("Add a check: a design that fails it goes no further.");
     var seen = {};
     (state.checks || []).forEach(function (c, i) {
       var nm = r.checks[i].name, ty = checkType(c.type);
@@ -686,7 +758,7 @@
     });
 
     // the measurements
-    if (!r.stages.length) error("Add a measurement: designs are compared on what it reports.");
+    if (!r.stages.length && kept.indexOf("flow.measure") < 0) error("Add a measurement: designs are compared on what it reports.");
     seen = {};
     var all = reported(state, cat);
     (state.stages || []).forEach(function (st, i) {
@@ -729,7 +801,7 @@
     }
 
     // the objective
-    if (!r.objectives.length) error("Add an objective: which reported numbers matter, and how.");
+    if (!r.objectives.length && kept.indexOf("objectives") < 0) error("Add an objective: which reported numbers matter, and how.");
     var metricsSeen = {}, balanced = 0;
     (state.objectives || []).forEach(function (o, i) {
       var m = String(o.metric || "").trim(), ro = r.objectives[i];
@@ -750,7 +822,7 @@
     // the flow
     FLOW_BOXES.forEach(function (b) {
       var v = flow[b];
-      if (typeof v === "string" && v.indexOf("agent:") === 0 && DELEGABLE.indexOf(b) < 0 && b !== "generate") {
+      if (typeof v === "string" && v.indexOf("agent:") === 0 && DELEGABLE.indexOf(b) < 0 && b !== "generate" && b !== "knowledge" && b !== "digest") {
         error("\"" + BOXES[b].title + "\" (" + b + ") is never handed to a coding agent: it establishes the facts.");
       } else if (v !== undefined && !choiceOf(b, v)) {
         error("\"" + BOXES[b].title + "\" (" + b + ") cannot be \"" + v + "\".");
@@ -779,13 +851,13 @@
       });
     });
 
-    ["steps", "passes", "repair_attempts", "finalists", "workers"].forEach(function (key) {
+    ["steps", "passes", "parallel", "batch", "repair_attempts", "finalists", "workers"].forEach(function (key) {
       var v = String((state.budget || {})[key] || "").trim();
       if (v && !/^\d+$/.test(v)) error("Budget \"" + key + "\" should be a whole number.");
     });
 
     var agents = {};
-    flowSaid(state).forEach(function (b) { if (String(flow[b]).indexOf("agent:") === 0) agents[flow[b].slice(6)] = 1; });
+    flowSaid(state).forEach(function (b) { if (String(flow[b]).indexOf("agent:") === 0 && flow[b] !== "agent:custom") agents[flow[b].slice(6)] = 1; });
     if (Object.keys(agents).length) note("The coding agent " + Object.keys(agents).join(", ") + " must be installed where it runs.");
     var files = {};
     cmds.forEach(function (c) {
@@ -801,11 +873,365 @@
     return msgs;
   }
 
-  var api = { buildYaml: buildYaml, check: check, resolve: resolve, setCatalog: setCatalog, toolOf: toolOf,
+  // ------------------------------------------------------------------ a document read back (D686)
+  /* `fromDoc(raw, normal, cat)`: an existing document as a state, for the web configurator.
+     `raw` is the document as written (yaml.safe_load), `normal` the loader's form of it
+     (TaskSpec.to_dict: gate and stages as lists, commands as argv, `flux` spelled
+     `{python} -W ignore -m flux_cli.main`). A command is matched against the catalog's
+     templates; what matches none is a custom row with the command itself. Whatever the state
+     cannot say is `kept`: those top-level keys are carried over exactly as written, and each
+     is named in `notes`. Nothing is dropped silently. */
+  var CHECK_TIMEOUT = 120, STAGE_TIMEOUT = 600;
+  var FLUX_ARGV = ["{python}", "-W", "ignore", "-m", "flux_cli.main"];
+  var STATE_KEYS = ["id", "statement", "contract", "language", "knowledge", "parts", "space", "flow", "gate", "stages",
+                    "objectives", "budget"];
+  var BUDGET_KEYS = ["steps", "passes", "parallel", "batch", "repair_attempts", "finalists", "workers", "prototype"];
+
+  function argvOf(run) {
+    var a = Array.isArray(run) ? run.map(String) : String(run || "").trim().split(/\s+/).filter(Boolean);
+    var flux = FLUX_ARGV.every(function (t, i) { return a[i] === t; });
+    return flux ? ["flux"].concat(a.slice(FLUX_ARGV.length)) : a;
+  }
+
+  /** A shell word as `shlex.split` reads it back. */
+  function shellWord(t) {
+    return /^[A-Za-z0-9_@%+=:,.\/{}-]+$/.test(t) ? t : "'" + String(t).replace(/'/g, "'\"'\"'") + "'";
+  }
+
+  /** The catalog tool of `role` whose command template this argv fills, and its params. */
+  function matchTool(argv, role, cat) {
+    var tools = (cat || CATALOG).filter(function (t) { return t.role === role && t.run && !isCustom(t.id); });
+    for (var i = 0; i < tools.length; i++) {
+      var t = tools[i], tmpl = String(t.run).trim().split(/\s+/), params = {}, ok = tmpl.length === argv.length;
+      for (var k = 0; ok && k < tmpl.length; k++) {
+        var m = /^\{([A-Za-z_]\w*)\}$/.exec(tmpl[k]);
+        if (m && t.params && Object.prototype.hasOwnProperty.call(t.params, m[1])) params[m[1]] = shown(argv[k]);
+        else if (tmpl[k] !== argv[k]) ok = false;
+      }
+      if (ok) return { tool: t, params: params };
+    }
+    return null;
+  }
+
+  function checkTypeOf(toolId, name) {
+    if (toolId === "rtl-lint") return name === "compile" ? "compile" : "lint";
+    if (toolId === "champsim-build") return "compile";
+    if (toolId === "rtl-golden") return "golden";
+    if (toolId === "python-test-script" || toolId === "champsim-check") return "test";
+    return "custom";
+  }
+
+  /** D775: a document of this layout in the shape the reader below reads: each box's settings
+      taken out of `flow` -- test the gate, measure the stages (a list), dse's space and seeds,
+      knowledge's files, select's finalists. */
+  /** D795: who works a box, as a document says it (`model`, `off`, `{by: claude, ...}`) and as
+      the configurator holds it (the loop's inside words: llm, none, {agent: ...}). */
+  var BY_WORDS = {};                     // the configurator holds the document's own words; only agents differ
+  var PRESETS = ["opencode", "claude", "codex"];
+  var AGENT_OPTS = ["session", "timeout_s", "questions", "max_questions", "wait_s", "bin", "args", "probe", "allow", "output", "resume", "name"];
+  function toInner(box, v) {
+    var words = BY_WORDS[box] || {};
+    if (v === false) v = "off";
+    if (typeof v === "string") {
+      if (box === "dse") return v;
+      if (PRESETS.indexOf(v) >= 0) return { agent: v };
+      return words[v] !== undefined ? words[v] : v;
+    }
+    if (!v || typeof v !== "object" || Array.isArray(v) || !("by" in v)) return v;
+    var rest = {}, opts = {}, k;
+    for (k in v) if (k !== "by") (AGENT_OPTS.indexOf(k) >= 0 ? opts : rest)[k] = v[k];
+    if (v.by === "model") {
+      if (box === "dse") return Object.keys(rest).length ? Object.assign(rest, { policy: "model" }) : "model";
+      return Object.keys(rest).length ? rest : (words.model || "model");
+    }
+    var spec = typeof v.by === "object" ? Object.assign({}, v.by, opts) : Object.keys(opts).length ? Object.assign({ preset: v.by }, opts) : v.by;
+    return Object.assign(rest, { agent: spec });
+  }
+  function toSurface(box, v) {
+    var words = BY_WORDS[box] || {}, back = {}, k;
+    for (k in words) back[words[k]] = k;
+    if (typeof v === "string") return box === "dse" ? (v === "llm" ? { by: "model" } : v) : (back[v] !== undefined ? back[v] : v);
+    if (!v || typeof v !== "object" || Array.isArray(v) || !("agent" in v)) return v;
+    var rest = {}, a = v.agent;
+    for (k in v) if (k !== "agent") rest[k] = v[k];
+    var who = a && typeof a === "object" && a.preset ? Object.assign({ by: a.preset }, a) : { by: a };
+    delete who.preset;
+    var plain = Object.keys(who).length === 1 && typeof who.by === "string" && !Object.keys(rest).length;
+    return plain && box !== "dse" ? who.by : Object.assign(who, rest);
+  }
+
+  /** D797: whether an `orchestrate` value is a search -- a policy's word, phases, or a space. */
+  function isSearch(v) {
+    if (Array.isArray(v)) return true;
+    if (typeof v === "string") return DSE_POLICIES.indexOf(v) >= 0 || ["control", "phases"].indexOf(v) >= 0;
+    return !!v && typeof v === "object" && ("space" in v || "seeds" in v || "policy" in v);
+  }
+
+  function unlifted(doc) {
+    if (!doc || typeof doc !== "object") return doc;
+    var out = {}, k;
+    for (k in doc) if (k !== "flow") out[k] = doc[k];
+    var fl = doc.flow && typeof doc.flow === "object" && !Array.isArray(doc.flow) ? doc.flow : null;
+    if (!fl) return out;
+    var f = {};
+    for (k in fl) {
+      var key = k === "orchestrate" && isSearch(fl[k]) ? "dse" : k;            // D797: a search is the orchestrator's
+      f[key] = ["test", "measure"].indexOf(k) >= 0 ? fl[k] : toInner(key, fl[k]);   // D795
+    }
+    if ("test" in f) { out.gate = f.test; delete f.test; }
+    if ("measure" in f) {
+      var m = f.measure || {};
+      out.stages = Object.keys(m).map(function (n) {
+        var v = m[n];
+        return typeof v === "string" || Array.isArray(v) ? { name: n, command: v } : Object.assign({ name: n }, v || {});
+      });
+      delete f.measure;
+    }
+    if (f.dse && typeof f.dse === "object" && !Array.isArray(f.dse) && ("space" in f.dse || "seeds" in f.dse || "policy" in f.dse)) {
+      var d = Object.assign({}, f.dse);
+      if ("space" in d) { out.space = d.space; delete d.space; }
+      if ("seeds" in d) { out.seeds = d.seeds; delete d.seeds; }
+      if ("policy" in d) f.dse = d.policy; else if (Object.keys(d).length) f.dse = d; else delete f.dse;
+    }
+    if (f.knowledge && typeof f.knowledge === "object" && !Array.isArray(f.knowledge) && "lessons" in f.knowledge) {
+      f.lessons = toInner("lessons", f.knowledge.lessons);                  // D796: the Learn box
+      f.knowledge = Object.assign({}, f.knowledge); delete f.knowledge.lessons;
+      if (!Object.keys(f.knowledge).length) delete f.knowledge;
+    }
+    if ("knowledge" in f) {
+      var kn = f.knowledge;
+      if (kn === "off" || kn === false) f.knowledge = ["none"];          // YAML reads a bare `off` as false
+      else if (kn && typeof kn === "object" && !Array.isArray(kn)) {
+        var read = {};
+        ["files", "sheet", "text"].forEach(function (x) { if (x in kn) read[x] = kn[x]; });
+        if (Object.keys(read).length) out.knowledge = read;
+        if (kn.agent !== undefined) f.knowledge = { agent: kn.agent };
+        else if (kn.off) f.knowledge = ["none"];
+        else delete f.knowledge;
+      }
+    }
+    if (f.select && typeof f.select === "object" && !Array.isArray(f.select) && "finalists" in f.select) {
+      var sl = Object.assign({}, f.select);
+      out.budget = Object.assign({}, out.budget || {}, { finalists: sl.finalists });
+      delete sl.finalists;
+      if (Object.keys(sl).length) f.select = sl; else delete f.select;
+    }
+    if (Object.keys(f).length) out.flow = f;
+    return out;
+  }
+
+  /** D775: where a part the configurator keeps as written lives now. */
+  var KEPT_AT = { gate: "flow.test", stages: "flow.measure", space: "flow.dse.space", seeds: "flow.dse.seeds",
+                  knowledge: "flow.knowledge", flow: "flow.boxes" };
+
+  /** A kept flow part's value, from the document as written (this layout). */
+  function keptValue(doc, at) {
+    var fl = (doc && doc.flow) || {}, out, k;
+    if (at === "flow.test") return fl.test;
+    if (at === "flow.measure") return fl.measure;
+    if (at === "flow.knowledge") return fl.knowledge;
+    var search = isSearch(fl.orchestrate) ? fl.orchestrate : null;      // D797: the search is orchestrate's
+    if (at === "flow.dse.space") return search && search.space;
+    if (at === "flow.dse.seeds") return search && search.seeds;
+    if (at === "flow.boxes") {                      // every box's choice, without what is kept or edited apart
+      out = {};
+      for (k in fl) {
+        if (["test", "measure"].indexOf(k) >= 0) continue;
+        var v = fl[k];
+        if (k === "orchestrate" && isSearch(v)) k = "dse";
+        if (k === "knowledge") {                     // its choice (off, an agent, a digest); its files apart
+          if (v && typeof v === "object" && !Array.isArray(v)) {
+            v = Object.assign({}, v); ["files", "sheet", "text", "library"].forEach(function (x) { delete v[x]; });
+            if (!Object.keys(v).length) continue;
+          }
+        }
+        if (k === "dse" && v && typeof v === "object" && !Array.isArray(v)) {
+          v = Object.assign({}, v); delete v.space; delete v.seeds;
+          if (!Object.keys(v).length) continue;
+          if ("policy" in v && Object.keys(v).length === 1) v = v.policy;
+        }
+        if (k === "select" && v && typeof v === "object" && !Array.isArray(v)) {
+          v = Object.assign({}, v); delete v.finalists;
+          if (!Object.keys(v).length) continue;
+        }
+        out[k] = v;
+      }
+      return out;
+    }
+    return undefined;
+  }
+
+  function fromDoc(raw, normal, cat) {
+    var asWritten = raw || {};
+    raw = unlifted(raw || {}); normal = unlifted(normal) || raw;
+    var s = base(), kept = [], notes = [];
+    s.keptFlow = {};
+    function keep(key, why) {
+      var at = KEPT_AT[key] || key;
+      if (kept.indexOf(at) < 0 && raw[key] !== undefined) {
+        kept.push(at); notes.push("`" + at + "` is kept as written: " + why + ".");
+        if (at.indexOf("flow.") === 0) s.keptFlow[at] = keptValue(asWritten, at);
+      }
+    }
+    s.id = String(raw.id || normal.id || "");
+    s.statement = String(raw.statement || normal.statement || "").trim();
+    s.contract = String(raw.contract || "").trim();
+    var lang = String(raw.language || normal.language || "");
+    if (lang && LANGUAGES.indexOf(lang.toLowerCase()) >= 0) s.language = lang.toLowerCase();
+    else if (lang) { s.language = "other"; s.languageOther = lang; }
+
+    // knowledge: the files the model reads (the papers are library/'s, D791)
+    var kn = raw.knowledge;
+    if (kn && typeof kn === "object" && !Array.isArray(kn) && Object.keys(kn).every(function (k) { return k === "files"; })) {
+      if (kn.files) s.knowledgeFiles = (Array.isArray(kn.files) ? kn.files : [kn.files]).join(", ");
+    } else if (kn) keep("knowledge", "a methods sheet or inline notes, which the configurator does not edit");
+
+    // parts: decompose, or names alone
+    var pa = raw.parts;
+    if (pa === "decompose") s.partsMode = "decompose";
+    else if (Array.isArray(pa) && pa.every(function (x) { return typeof x === "string"; })) { s.partsMode = "list"; s.parts = pa.join(", "); }
+    else if (pa !== undefined && pa !== null) keep("parts", "parts with their own statements");
+
+    // space: knob -> choices
+    var sp = raw.space;
+    if (sp && typeof sp === "object" && !Array.isArray(sp)) {
+      var plain = Object.keys(sp).every(function (k) { return Array.isArray(sp[k]); });
+      if (plain) s.space = Object.keys(sp).map(function (k) { return { knob: k, choices: sp[k].join(", ") }; });
+      else keep("space", "knobs that move with others (`when`)");
+    }
+
+    // flow: each box as one of its choices
+    var fl = normal.flow || raw.flow || {}, flowOk = true;
+    Object.keys(fl).forEach(function (box) {
+      var v = fl[box];
+      if (["test", "measure", "records"].indexOf(box) >= 0) return;
+      if (!BOXES[box]) { flowOk = false; return; }
+      if (box === "knowledge") {
+        var ls = Array.isArray(v) ? v : [v];
+        if (v && typeof v === "object" && !Array.isArray(v) && typeof v.agent === "string" && choiceOf("digest", "agent:" + v.agent)) { s.flow.digest = "agent:" + v.agent; return; }   // D773, D784
+        if (ls.length === 1 && ls[0] === "none") s.flow.knowledge = "none";
+        else if (!(ls.length === 0 || (ls.length === 1 && ls[0] === "library"))) flowOk = false;
+        return;
+      }
+      if (typeof v === "string" && choiceOf(box, v)) { s.flow[box] = v; return; }
+      if (v && typeof v === "object" && typeof v.agent === "string" && choiceOf(box, "agent:" + v.agent)) { s.flow[box] = "agent:" + v.agent; return; }
+      if (v && typeof v === "object" && v.agent && typeof v.agent === "object") {      // D728: its own settings, kept as written
+        var pre = typeof v.agent.preset === "string" && choiceOf(box, "agent:" + v.agent.preset) ? v.agent.preset : null;
+        if (!pre && DELEGABLE.indexOf(box) < 0 && box !== "generate") { flowOk = false; return; }
+        s.flow[box] = "agent:" + (pre || "custom");
+        (s.agentRaw = s.agentRaw || {})[box] = v;
+        return;
+      }
+      if (box === "generate" && v && typeof v === "object" && v.command !== undefined) {
+        s.flow.generate = "command"; s.generateCommand = argvOf(v.command).map(shellWord).join(" "); return;
+      }
+      flowOk = false;
+    });
+    if (!flowOk) { s.flow = defaultFlow(); keep("flow", "some of its choices are not the configurator's (an agent's own settings, a catalog, knowledge sources)"); }
+
+    // gate: checks in order
+    var gate = normal.gate;
+    var gateOk = true;
+    if (typeof gate === "string" || Array.isArray(gate)) gate = { test: gate };
+    if (gate && typeof gate === "object") {             // D789: a map by name, in order
+      gate = Object.keys(gate).map(function (n) {
+        var c = gate[n];
+        return (c && typeof c === "object" && !Array.isArray(c)) ? Object.assign({ name: n }, c) : { name: n, run: c };
+      });
+    }
+    (gate || []).forEach(function (c) {
+      if (c.fail_re) gateOk = false;
+      var argv = argvOf(c.run), m = matchTool(argv, "check", cat);
+      var custom = !m || (c.count_re && c.count_re !== "(\\d+) failing");
+      var row = custom ? { type: "custom", tool: "custom-check", name: c.name, params: { command: argv.map(shellWord).join(" ") },
+                           count_re: c.count_re && c.count_re !== "(\\d+) failing" ? c.count_re : "", timeout: "" }
+                       : { type: checkTypeOf(m.tool.id, c.name), tool: m.tool.id, name: c.name, params: paramsOf(m.tool, m.params),
+                           count_re: "", timeout: "" };
+      if (c.timeout_s && Number(c.timeout_s) !== CHECK_TIMEOUT) row.timeout = String(c.timeout_s);
+      s.checks.push(row);
+    });
+    if (!gateOk) { s.checks = []; keep("gate", "a failure pattern (`fail_re`)"); }
+
+    // stages: a catalog tool, an evaluator, or a command of one's own
+    var stagesOk = true;
+    var rawStages = {};                          // what the document wrote: the loader adds patterns of its own
+    (Array.isArray(raw.stages) ? raw.stages : []).forEach(function (x) { if (x && x.name) rawStages[x.name] = x; });
+    (normal.stages || []).forEach(function (st) {
+      var said = rawStages[st.name] || {};
+      if (said.metrics_re && Object.keys(said.metrics_re).length) { stagesOk = false; return; }
+      var row = null;
+      if (st.command) {
+        var argv = argvOf(st.command), m = matchTool(argv, "stage", cat);
+        if (m) row = { tool: m.tool.id, name: st.name, params: paramsOf(m.tool, m.params), metrics: "", needs: "", gates: [] };
+        else row = { tool: "custom-stage", name: st.name, params: { command: argv.map(shellWord).join(" ") },
+                     metrics: (st.metrics || []).join(", "), needs: (st.needs || []).join(", "), gates: [] };
+      } else if (st.evaluator) {
+        var ev = (cat || CATALOG).filter(function (t) { return t.role === "stage" && t.stage && t.stage.evaluator === st.evaluator; })[0];
+        if (!ev) { stagesOk = false; return; }
+        var p = {};
+        for (var dk in ev.document || {}) {
+          var mm = /^\{([A-Za-z_]\w*)\}$/.exec(String(ev.document[dk]));
+          if (mm && raw[dk] !== undefined) p[mm[1]] = shown(String(raw[dk]));
+        }
+        row = { tool: ev.id, name: st.name, params: paramsOf(ev, p), metrics: "", needs: "", gates: [] };
+      } else { stagesOk = false; return; }                         // measured by the world's own code
+      var cuts = st.cutoff ? (Array.isArray(st.cutoff) ? st.cutoff : [st.cutoff]) : [];
+      row.gates = cuts.map(function (c) {
+        if ("within" in c) return { metric: c.metric, rule: "within", value: String(Math.round(Number(c.within) * 100000) / 1000) };
+        if ("below" in c) return { metric: c.metric, rule: "below", value: String(c.below) };
+        return { metric: c.metric, rule: "at", value: String(c.at) };
+      });
+      var e = st.estimate;
+      row.estimate = e ? { kind: e.kind, margin: String(Math.round(Number(e.margin || 0) * 100000) / 1000), command: e.command ? argvOf(e.command).map(shellWord).join(" ") : "" }
+                       : { kind: "off", margin: "5", command: "" };
+      if (st.timeout_s && Number(st.timeout_s) !== STAGE_TIMEOUT) row.timeout = String(st.timeout_s);
+      s.stages.push(row);
+    });
+    if (!stagesOk) { s.stages = []; keep("stages", "a stage measured by the world's code or read with its own patterns (`metrics_re`)"); }
+    if (raw.workload !== undefined && !s.stages.some(function (r) { var t = toolOf(r.tool, cat); return t && t.document && "workload" in t.document; }))
+      keep("workload", "no evaluator stage here writes it");
+
+    // objectives: the labels the configurator has
+    var objOk = true, rawObjs = Array.isArray(raw.objectives) ? raw.objectives : [];
+    (normal.objectives || []).forEach(function (o, i) {
+      // what the document wrote decides; the loader fills stage, tie, margin and unit of its own
+      var said = rawObjs[i] && typeof rawObjs[i] === "object" ? rawObjs[i] : {};
+      var extra = Object.keys(said).filter(function (k) { return ["metric", "direction", "goal", "balance", "unit"].indexOf(k) < 0; });
+      if (extra.length) objOk = false;
+      var label = o.balance ? "balance" : o.goal !== undefined && o.goal !== null ? (o.direction === "minimize" ? "atmost" : "atleast")
+                : o.direction === "minimize" ? "min" : "max";
+      s.objectives.push({ metric: o.metric, label: label, value: o.goal !== undefined && o.goal !== null ? String(o.goal) : "",
+                          unit: o.unit || "", direction: o.balance ? o.direction : "" });
+    });
+    if (!objOk) { s.objectives = []; keep("objectives", "objectives with a stage, a tie or a margin of their own"); }
+
+    // budget
+    var bu = raw.budget || {};
+    if (Object.keys(bu).every(function (k) { return BUDGET_KEYS.indexOf(k) >= 0; }))
+      BUDGET_KEYS.forEach(function (k) { if (bu[k] !== undefined && bu[k] !== null) s.budget[k] = String(bu[k]); });
+    else {
+      keep("budget", "it sets " + Object.keys(bu).filter(function (k) { return BUDGET_KEYS.indexOf(k) < 0; }).join(", "));
+      if (bu.finalists !== undefined && bu.finalists !== null) s.budget.finalists = String(bu.finalists);   // D775: flow.select's own
+    }
+
+    Object.keys(raw).forEach(function (k) {
+      if (STATE_KEYS.indexOf(k) < 0 && k !== "workload") keep(k, k === "seeds" ? "the search's starting points" : "the configurator does not edit it");
+    });
+    s.kept = kept;
+    return { state: s, kept: kept, notes: notes };
+  }
+
+  /** A drawing node's title, as the box shows it (D727: the web's step bar names its box). */
+  function boxTitle(id) {
+    return { "crit-division": "Critic: division", "crit-part": "Critic: each part", "crit-decision": "Critic: decision",
+             parts: "Parts" }[id] || (BOXES[id] || {}).title || id;
+  }
+
+  var api = { boxTitle: boxTitle, buildYaml: buildYaml, check: check, fromDoc: fromDoc, argvOf: argvOf, resolve: resolve, setCatalog: setCatalog, toolOf: toolOf,
               toolsFor: toolsFor, newCheck: newCheck, setCheckTool: setCheckTool, newStage: newStage,
               newObjective: newObjective, reports: reports, reported: reported, fillRun: fillRun,
               describeObjectives: describeObjectives, naturalDirection: naturalDirection, clockPs: clockPs,
-              CHECK_TYPES: CHECK_TYPES, stageTools: stageTools, abbreviate: abbreviate, autoClock: autoClock, LABELS: LABELS,
+              CHECK_TYPES: CHECK_TYPES, stageTools: stageTools, nextStageTool: nextStageTool, abbreviate: abbreviate, autoClock: autoClock, LABELS: LABELS,
               BOXES: BOXES, FLOW_BOXES: FLOW_BOXES, DELEGABLE: DELEGABLE, NEVER: NEVER, LANGUAGES: LANGUAGES,
               AGENTS: AGENTS, DSE_POLICIES: DSE_POLICIES, halfOf: halfOf, defaultFlow: defaultFlow, base: base, isFixed: isFixed,
               explain: explain, explainEstimate: explainEstimate };
@@ -833,12 +1259,16 @@
     return el;
   }
 
-  function mount(host) {
-    var state = base();
+  /** `opts` (the web configurator, D686): `state` to start from, `save(yaml, state)` returning a
+      promise of a line to show, `notes` on what is kept as written. */
+  function mount(host, readonly, opts) {
+    opts = opts || {};
+    var state = opts.state || base();
     var openBox = null, openNode = null;
     var parts = {};
 
     function changed(structural) {
+      parts.touched = true;
       if (structural) renderForm();
       renderDiagram();
       renderOutput();
@@ -914,15 +1344,15 @@
       var p = t.params[k];
       if (k === "clock_ps") {
         var auto = autoClock(state), dflt = auto || num(p.default) || 1000;
-        return field("Clock the tools aim for (MHz)", function () {
+        return field("Clock (MHz)", function () {
           var v = String(row.params.clock_ps || ""), ps = num(v);
           return ps ? String(Math.round(1e6 / ps)) : v;
         }, function (v) { var ps = clockPs(v); row.params.clock_ps = ps ? String(ps) : v; },
-        { compact: true, placeholder: String(Math.round(1e6 / dflt)) + (auto ? " (from the objective)" : ""),
-          hint: "fmax is measured; this steers synthesis: tighter = faster and bigger" });
+        { compact: true, narrow: true, placeholder: String(Math.round(1e6 / dflt)),
+          hint: "The clock the tools aim for" + (auto ? " (empty: from the objective)" : "") + ". fmax is measured; this steers synthesis: tighter = faster and bigger" });
       }
       return field(p.label + (p.unit ? " (" + p.unit + ")" : ""), function () { return row.params[k]; }, function (v) { row.params[k] = v; },
-                   { compact: true, placeholder: shown(p.default), grow: k === "command" });
+                   { compact: true, placeholder: shown(p.default), grow: typeof p.default !== "number" });
     }
 
     // -- checks
@@ -982,7 +1412,7 @@
         var line = [h("span", { class: "fc-idx", text: (estimated ? "~" : "") + String(i + 1), title: estimated ? "estimated first" : null }),
           field("Tool", function () { return st.tool; }, function (v) {
             var fresh = newStage({ stages: [] }, v); st.tool = v; st.params = fresh.params; st.gates = [];
-          }, { compact: true, structural: true, options: tools }),
+          }, { compact: true, structural: true, grow: true, options: tools }),
           field("Name", function () { return st.name; }, function (v) { st.name = v; }, { compact: true, narrow: true })];
         if (keys.length) line.push(paramField(t, st, keys[0]));
         if (custom) {
@@ -1028,10 +1458,7 @@
       var add = button("+ Add a measurement", function () {
         // the first tool made for this language that is not used yet, else a custom command
         var lang = language(state, true), used = state.stages.map(function (x) { return x.tool; });
-        var pick = tools.map(function (x) { return x[0]; }).filter(function (id) {
-          var t = toolOf(id); return t && !isCustom(id) && lang && (t.languages || []).indexOf(lang) >= 0 && used.indexOf(id) < 0;
-        })[0] || "custom-stage";
-        state.stages.push(newStage(state, pick));
+        state.stages.push(newStage(state, nextStageTool(lang, used)));
         changed(true);
       }, "fc-add-btn");
       return titled("Measurements", [h("span", { class: "fc-hint fc-inline", text: " cheapest first" })], [h("div", { class: "fc-rows" }, rows), add]);
@@ -1076,9 +1503,10 @@
       var langs = [["", "Choose..."]].concat(LANGUAGES.map(function (l) { return [l, l]; })).concat([["other", "other..."]]);
       var what = titled("1. What do you want?", [], [
         h("div", { class: "fc-line" }, [
-          field("Name", function () { return state.id; }, function (v) { state.id = v; }, { compact: true, placeholder: "my_design", hint: "Letters, digits and _" }),
-          field("Language of the design", function () { return state.language; }, function (v) { state.language = v; },
-                { compact: true, options: langs, structural: true }),
+          field(opts.nameLabel || "Name", function () { return state.id; }, function (v) { state.id = v; },
+                { compact: true, placeholder: opts.namePlaceholder || "my_design", hint: opts.nameHint || "Letters, digits and _" }),
+          field("Language", function () { return state.language; }, function (v) { state.language = v; },
+                { compact: true, options: langs, structural: true, hint: "The language the designs are written in" }),
           state.language === "other" ? field("Which language?", function () { return state.languageOther; }, function (v) { state.languageOther = v; }, { compact: true, placeholder: "ini" }) : null,
           ]),
         field("What should be made? Say it as you would to an engineer.", function () { return state.statement; },
@@ -1088,6 +1516,11 @@
                 function (v) { state.contract = v; }, { area: true, rows: 1, grow: true, placeholder: "Names, ports, what is not allowed" }),
           field("Files the model reads (optional)", function () { return state.knowledgeFiles; },
                 function (v) { state.knowledgeFiles = v; }, { compact: true, grow: true, placeholder: "spec.md, notes.txt", hint: "Beside the document, separated by commas" })]),
+        h("div", { class: "fc-line" }, [                    // D781, D791: who digests the papers of library/
+          field("Digest the papers in the Setup", function () { return state.flow.digest || "model"; },
+                function (v) { state.flow.digest = v; }, { compact: true, structural: true,
+                  options: BOXES.digest.choices.map(function (c) { return [c.value, c.label.split(":")[0].replace(/^The /, "")]; }),
+                  hint: "Papers go in library/ beside the document; each is summed up once" })]),
       ]);
       var kids = [what];
       if (!CATALOG.length) kids.push(h("p", { class: "fc-hint", text: "The tool list did not load; only Custom checks and measurements are offered." }));
@@ -1112,7 +1545,7 @@
         at("test", "test", C, 3), at("crit-part", "critique", C + (W - SW) / 2, 4, true),
         at("measure", "measure", C, 5), at("calibrate", "calibrate", C, 6),
         at("select", "select", C, 7), at("crit-decision", "critique", S + (W - SW) / 2, 7, true),
-        at("records", "records", C, 8), at("extract", "extract", S, 8)];
+        at("records", "records", C, 8), at("lessons", "lessons", S, 8), at("digest", "digest", S, 3)];
       if (hasParts()) out.push(at("parts", "parts", L - 44, 4, true));
       return out;
     }
@@ -1141,6 +1574,7 @@
         { d: down("orchestrate", "generate") },
         { d: "M" + right("dse") + " " + cy("dse") + " H" + left("generate") },
         { d: "M" + left("knowledge") + " " + (cy("knowledge") - 8) + " H" + right("generate"), side: true },
+        { d: "M" + cx("digest") + " " + top("digest") + " V" + bot("knowledge"), side: true },          // D784: the papers summed up
         { d: elbow("generate", "test") },
         { d: down("test", "crit-part") },
         { d: down("crit-part", "measure") },
@@ -1148,8 +1582,8 @@
         { d: down("calibrate", "select") },
         { d: "M" + right("select") + " " + cy("select") + " H" + left("crit-decision") },
         { d: down("select", "records") },
-        { d: "M" + right("records") + " " + cy("records") + " H" + left("extract"), side: true },
-        { d: "M" + right("extract") + " " + cy("extract") + " H" + (LAYOUT.width - 12) + " V" + (cy("knowledge") + 6) + " H" + right("knowledge"), side: true },
+        { d: "M" + right("records") + " " + cy("records") + " H" + left("lessons"), side: true },
+        { d: "M" + right("lessons") + " " + cy("lessons") + " H" + (LAYOUT.width - 12) + " V" + (cy("knowledge") + 6) + " H" + right("knowledge"), side: true },
         { d: "M" + left("records") + " " + cy("records") + " H22 V" + cy("plan") + " H" + left("plan"), back: true,
           label: { x: 14, y: (cy("plan") + cy("records")) / 2, text: "at rest → explore", rotate: true } },
         // the refusals, red and dotted
@@ -1192,9 +1626,13 @@
         var box = BOXES[n.box] || { title: "Parts", fixed: "Set under Advanced > Parts." };
         var title = n.id === "crit-division" ? "Critic: division" : n.id === "crit-part" ? "Critic: each part"
                   : n.id === "crit-decision" ? "Critic: decision" : n.id === "parts" ? "parts: sub-loops, composed" : box.title;
-        var attrs = { class: "fc-box fc-" + half + (fixed ? " fc-static" : "") + (openNode === n.id ? " fc-open" : "") + (n.small ? " fc-smallbox" : ""),
+        var live = !fixed && !readonly;
+        var act = readonly && parts.activity ? parts.activity[n.id] : null;      // D726
+        var picks = readonly && !!opts.onBox;
+        var attrs = { class: "fc-box fc-" + half + (fixed ? " fc-static" : "") + (live ? "" : " fc-inert") + (openNode === n.id ? " fc-open" : "") + (n.small ? " fc-smallbox" : "")
+                      + (parts.activity && readonly && opts.onBox ? (act ? " fc-act fc-act-" + act.state : " fc-act-idle") : "") + (picks && act ? " fc-pick" : "") + (act && act.sel ? " fc-sel" : ""),
                       "data-box": n.box, "data-node": n.id };
-        if (!fixed) {
+        if (live) {
           attrs.tabindex = "0"; attrs.role = "button"; attrs["aria-haspopup"] = "dialog";
           attrs["aria-expanded"] = openNode === n.id ? "true" : "false";
           attrs["aria-label"] = title + ": " + (choiceOf(n.box, state.flow[n.box]) || {}).label;
@@ -1203,7 +1641,8 @@
         }
         var g = s("g", attrs);
         var full = stepNames(n.box);
-        g.appendChild(s("title", {}, title + (full && full.length ? ": " + full.join(" → ") : "") + (fixed ? " — " + (box.fixed || "fixed") : "")));
+        g.appendChild(s("title", {}, act && act.title ? title + ": " + act.title : readonly ? title + " (" + n.box + "): " + (box.says || box.fixed)
+                                   : title + (full && full.length ? ": " + full.join(" → ") : "") + (fixed ? " — " + (box.fixed || "fixed") : "")));
         if (n.id === "parts") {                       // a stack: two shadows behind
           [6, 3].forEach(function (d) { g.appendChild(s("rect", { x: n.x + d, y: n.y - d, width: n.w, height: n.h, rx: 6, class: "fc-stack" })); });
         }
@@ -1212,10 +1651,15 @@
           g.appendChild(s("text", { x: n.x + n.w / 2, y: n.y + 19, "text-anchor": "middle", class: "fc-box-small" + (n.id === "parts" ? " fc-tiny" : "") }, title));
         } else {
           g.appendChild(s("text", { x: n.x + n.w / 2, y: n.y + 19, "text-anchor": "middle", class: "fc-box-name" }, title));
-          g.appendChild(s("text", { x: n.x + n.w / 2, y: n.y + 35, "text-anchor": "middle", class: "fc-box-half" }, subtitle(n.box, half)));
+          g.appendChild(s("text", { x: n.x + n.w / 2, y: n.y + 35, "text-anchor": "middle", class: "fc-box-half" }, act && act.label ? act.label : subtitle(n.box, half)));
         }
         if (fixed && !n.small) lock(g, n.x + n.w - 11, n.y + 5);
-        if (!fixed) {
+        if (picks && act) {                            // D726: a box with activity opens its latest task
+          g.setAttribute("tabindex", "0"); g.setAttribute("role", "button");
+          g.addEventListener("click", function () { opts.onBox(n.id); });
+          g.addEventListener("keydown", function (ev) { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); opts.onBox(n.id); } });
+        }
+        if (live) {
           g.addEventListener("click", function () { openPopover(openNode === n.id ? null : n.box, false, n.id); });
           g.addEventListener("keydown", function (ev) {
             if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openPopover(openNode === n.id ? null : n.box, true, n.id); }
@@ -1252,6 +1696,7 @@
       if (name === "orchestrate" && state.flow.orchestrate === "default" && !(state.flow.dse && state.flow.dse !== "none")) {
         text = hasParts() ? "model picks the part" : "default: one design";
       }
+      if (readonly && (name === "test" || name === "measure")) return name === "test" ? "your checks" : "your measurements";
       var names = stepNames(name);
       max = max || 24;
       if (names) return names.length ? abbreviate(names, max) : "none yet";
@@ -1288,6 +1733,9 @@
       p.appendChild(h("p", { text: box.says }));
       var now = explain(openBox, state);
       if (now) p.appendChild(h("p", { class: "fc-hint fc-now", text: "As set: " + now + "." }));
+      var raw = state.agentRaw && state.agentRaw[openBox];
+      if (raw) p.appendChild(h("p", { class: "fc-hint fc-now", text: "A coding agent with its own settings, kept as written: " + JSON.stringify(raw.agent) +
+        ". Choosing another replaces them." }));
       if (openBox === "orchestrate" && state.flow.dse !== "none") {
         p.appendChild(h("p", { class: "fc-hint", text: "A search is on, so the search picks the next job." }));
       } else if (box.choices.length === 1) {
@@ -1301,6 +1749,7 @@
           input.addEventListener("change", function () {
             var name = openBox;
             state.flow[name] = c.value;
+            if (state.agentRaw) delete state.agentRaw[name];          // another choice: its own settings go
             changed(name === "dse" || name === "generate");
             fillPopover(); placePopover();
             var again = document.getElementById(id); if (again) again.focus();
@@ -1338,7 +1787,8 @@
       p.style.setProperty("--fc-arrow-x", Math.round(Math.min(Math.max(14, r.left + r.width / 2 - left), w - 14)) + "px");
     }
 
-    function renderLevel2() {
+    /** The legend and the drawing. */
+    function drawing() {
       parts.svg = document.createElementNS(SVGNS, "svg");
       parts.svg.setAttribute("viewBox", "0 0 " + LAYOUT.width + " " + LAYOUT.height);
       parts.svg.setAttribute("class", "fc-diagram");
@@ -1348,77 +1798,80 @@
         return h("span", { class: "fc-key fc-" + k }, [h("i"), HALVES[k]]);
       }));
       parts.lists = h("p", { class: "fc-hint fc-lists" });
-      return h("div", { class: "fc-level" }, [titled("2. Who does each step?", [h("span", { class: "fc-hint fc-inline", text: " click a box to change it; the defaults are usually right" })], [
-        legend, h("div", { class: "fc-drawing" }, [parts.svg, parts.lists])])]);
+      return [legend, h("div", { class: "fc-drawing" }, [parts.svg, parts.lists])];
     }
 
-    // -- level 3
-    /** A label | input | unit row: every Advanced row shares the same three columns. */
-    function kv(label, get, set, opts) {
-      opts = opts || {};
-      var input;
-      if (opts.options) {
-        input = h("select", { "aria-label": label, class: "fc-v" });
-        opts.options.forEach(function (o) {
-          var op = h("option", { value: o[0], text: o[1] });
-          if (String(get()) === o[0]) op.selected = true;
-          input.appendChild(op);
-        });
-        input.addEventListener("change", function () { set(input.value); changed(!!opts.structural); });
-      } else {
-        input = h("input", { type: "text", "aria-label": label, class: "fc-v", placeholder: opts.placeholder || "",
-                             inputmode: opts.numeric ? "numeric" : null });
-        input.value = get() || "";
-        input.addEventListener("input", function () { set(input.value); changed(false); });
+    function renderLevel2() {
+      if (!opts.foldSteps) {
+        return h("div", { class: "fc-level" }, [titled("2. Who does each step?", [h("span", { class: "fc-hint fc-inline", text: " click a box to change it; the defaults are usually right" })], drawing())]);
       }
-      if (opts.title) input.setAttribute("title", opts.title);
-      return h("label", { class: "fc-kv" + (opts.wide ? " fc-kv-wide" : ""), title: opts.title || null },
-               [h("span", { class: "fc-k", text: label }), input, h("span", { class: "fc-u", text: opts.unit || "" })]);
+      if (parts.stepsOpen === undefined) parts.stepsOpen = false;
+      var body = h("div", {}, drawing());
+      body.hidden = !parts.stepsOpen;
+      var toggle = h("button", { type: "button", class: "fc-toggle", "aria-expanded": parts.stepsOpen ? "true" : "false", on: { click: function () {
+        parts.stepsOpen = !parts.stepsOpen;
+        body.hidden = !parts.stepsOpen;
+        toggle.setAttribute("aria-expanded", parts.stepsOpen ? "true" : "false");
+        if (parts.stepsOpen) renderDiagram();
+      } } }, ["2. Who does each step?", h("span", { class: "fc-hint fc-inline", text: " the defaults are usually right: open to choose a model, an agent or rules per step" })]);
+      return h("section", { class: "fc-section fc-advanced" }, [h("h3", {}, [toggle]), body]);
     }
 
-    function group(title, rows) { return h("div", { class: "fc-group" }, [h("h4", { text: title })].concat(rows)); }
+    // -- level 3: the same fields and rows as above, behind one toggle
+    function sub(title, note, kids) {
+      return h("div", { class: "fc-sub" }, [h("h4", {}, [title, note ? h("span", { class: "fc-hint fc-inline", text: " " + note }) : null])].concat(kids));
+    }
 
     function renderLevel3() {
       var b = state.budget;
-      function num(label, key, dflt, unit, title) {
-        return kv(label, function () { return b[key]; }, function (v) { b[key] = v; },
-                  { numeric: true, placeholder: dflt, unit: unit, title: title + " (" + key + "; empty: " + dflt + ")" });
+      function num(label, key, dflt, hint) {
+        return field(label, function () { return b[key]; }, function (v) { b[key] = v; },
+                     { compact: true, placeholder: dflt, hint: hint + " (budget." + key + "; empty: " + dflt + ")" });
       }
-      var budget = h("div", { class: "fc-budget" }, [
-        group("Run", [
-          num("Designs per round", "steps", "24", "steps", "Work items in one round"),
-          num("Rounds", "passes", "until stopped", "passes", "How many rounds before the run stops"),
-          num("Measurements at once", "workers", "auto", "workers", "Tool runs in parallel; 1 for anything timed")]),
-        h("div", {}, [
-          group("Repair", [num("Fix attempts per design", "repair_attempts", "12", "attempts", "Repairs a draft gets after a check fails")]),
-          group("Measure", [num("Designs to the last measurement", "finalists", "3", "finalists", "How many designs reach the costliest measurement")]),
-          group("Prototype", [kv("Prove the idea first", function () { return b.prototype; }, function (v) { b.prototype = v; },
-            { title: "prototype: yes for maths, no for plain logic (empty: on with a golden model)", unit: "prototype",
-              options: [["", "default"], ["true", "yes"], ["false", "no"], ["python", "yes, in Python"], ["systemc", "yes, in SystemC"]] })])])]);
+      var budget = h("div", { class: "fc-grid" }, [
+        num("Designs per round", "steps", "24", "Work items in one round"),
+        num("Rounds", "passes", "until stopped", "How many rounds before the run stops"),
+        num("Rounds at once", "parallel", "1", "Rounds run side by side, each its own design; on a server an admin allows it"),
+        num("Search designs a round", "batch", "1", "With a search: designs one round tries side by side; 1 picks each round's design from the last ones' numbers"),
+        num("Repairs per design", "repair_attempts", "12", "Repairs a draft gets after a check fails"),
+        num("Designs fully measured", "finalists", "3", "How many designs reach the costliest measurement"),
+        num("Tool runs at once", "workers", "auto", "Measurements in parallel; 1 for anything timed"),
+        field("Prototype first", function () { return b.prototype; }, function (v) { b.prototype = v; },
+              { compact: true, hint: "The model proves the algorithm before the design is written: yes for maths, no for plain logic (budget.prototype; empty: on with a golden model)",
+                options: [["", "default"], ["true", "yes"], ["false", "no"], ["python", "yes, in Python"], ["systemc", "yes, in SystemC"]] })]);
 
-      var table = h("div", { class: "fc-table" }, [h("div", { class: "fc-table-head" }, [h("span", { text: "Setting" }), h("span", { text: "Its choices, in order" }), h("span")])]
-        .concat(state.space.map(function (r, i) {
-          return h("div", { class: "fc-table-row" }, [
-            h("input", { type: "text", "aria-label": "Setting", placeholder: "block", value: r.knob, on: { input: function (e) { r.knob = e.target.value; changed(false); } } }),
-            h("input", { type: "text", "aria-label": "Its choices, in order", placeholder: "16, 32, 64", value: r.choices, on: { input: function (e) { r.choices = e.target.value; changed(false); } } }),
-            button("\u00d7", function () { state.space.splice(i, 1); changed(true); }, "fc-small fc-icon")]);
-        }))
-        .concat([h("div", { class: "fc-table-foot" }, [button("+ Add a setting", function () { state.space.push({ knob: "", choices: "" }); changed(true); }, "fc-small")])]));
+      var knobs = state.space.map(function (r, i) {
+        return h("div", { class: "fc-row" }, [h("div", { class: "fc-line" }, [
+          h("span", { class: "fc-idx", text: String(i + 1) }),
+          field("Setting", function () { return r.knob; }, function (v) { r.knob = v; },
+                { compact: true, placeholder: "block", hint: "Its name; {name} in a command is the value tried" }),
+          field("Its choices, in order", function () { return r.choices; }, function (v) { r.choices = v; },
+                { compact: true, grow: true, placeholder: "16, 32, 64", hint: "Separated by commas" }),
+          h("div", { class: "fc-row-buttons" }, [button("\u00d7", function () { state.space.splice(i, 1); changed(true); }, "fc-small fc-icon")])])]);
+      });
+      var searching = state.flow.dse && state.flow.dse !== "none";
+      var space = sub("Settings to search", searching ? "each is {its name} in the commands" : "used once \"Search the settings\" is on, in the drawing above", [
+        h("div", { class: "fc-rows" }, knobs),
+        button("+ Add a setting", function () { state.space.push({ knob: "", choices: "" }); changed(true); }, "fc-add-btn")]);
 
-      var partsBox = h("div", { class: "fc-group fc-parts" }, [
-        kv("Split the design", function () { return state.partsMode; }, function (v) { state.partsMode = v; },
-           { structural: true, title: "Divide one design into parts, each made and checked on its own, then composed",
-             options: [["none", "no"], ["list", "into these parts"], ["decompose", "let it decide"]] }),
-        state.partsMode === "list" ? kv("Parts", function () { return state.parts; }, function (v) { state.parts = v; },
-                                         { placeholder: "decoder, datapath", wide: true, title: "Part names, separated by commas" }) : null]);
+      var split = sub("Parts", "one design made as several, each checked on its own, then composed", [h("div", { class: "fc-line" }, [
+        field("Split the design", function () { return state.partsMode; }, function (v) { state.partsMode = v; },
+              { compact: true, structural: true, options: [["none", "no"], ["list", "into these parts"], ["decompose", "let it decide"]] }),
+        state.partsMode === "list" ? field("Parts", function () { return state.parts; }, function (v) { state.parts = v; },
+                                           { compact: true, grow: true, placeholder: "decoder, datapath", hint: "Part names, separated by commas" }) : null])]);
 
-      var details = h("details", { class: "fc-advanced" }, [h("summary", { text: "3. Advanced" }),
-        titled("Budget", [h("span", { class: "fc-hint fc-inline", text: " empty = the loop's default (shown greyed)" })], [budget]),
-        titled("Settings to search", [h("span", { class: "fc-hint fc-inline", text: state.flow.dse === "none" ? " turn on \"Search the settings\" above to use them" : " each is {its name} in the commands" })], [table]),
-        titled("Parts", [], [partsBox])]);
-      if (parts.advancedOpen) details.open = true;
-      details.addEventListener("toggle", function () { parts.advancedOpen = details.open; });
-      return details;
+      // closed until asked for, or until something in it is in use
+      var inUse = !!(searching || state.space.length || hasParts());
+      if (inUse && !parts.advancedUsed) parts.advancedOpen = true;
+      parts.advancedUsed = inUse;
+      var body = h("div", { class: "fc-advanced-body" }, [sub("Budget", "empty = the loop's default, shown greyed", [budget]), space, split]);
+      body.hidden = !parts.advancedOpen;
+      var toggle = h("button", { type: "button", class: "fc-toggle", "aria-expanded": parts.advancedOpen ? "true" : "false", on: { click: function () {
+        parts.advancedOpen = !parts.advancedOpen;
+        body.hidden = !parts.advancedOpen;
+        toggle.setAttribute("aria-expanded", parts.advancedOpen ? "true" : "false");
+      } } }, ["3. Advanced", h("span", { class: "fc-hint fc-inline", text: " budget, settings to search, parts" })]);
+      return h("section", { class: "fc-section fc-advanced" }, [h("h3", {}, [toggle]), body]);
     }
 
     function renderForm() {
@@ -1431,14 +1884,15 @@
     function renderOutput() {
       renderGoalWords();
       var yaml = buildYaml(state), id = String(state.id || "").trim() || "my_problem";
-      var file = id + ".problem.yaml";
+      var file = id + "/problem.yaml";
       parts.code.textContent = yaml;
       parts.file.textContent = file;
       var msgs = check(state);
       parts.checks.innerHTML = "";
       if (!msgs.some(function (m) { return m.level !== "note"; })) parts.checks.appendChild(h("li", { class: "fc-ok", text: "Looks complete." }));
-      msgs.forEach(function (m) { parts.checks.appendChild(h("li", { class: "fc-" + m.level, text: m.text })); });
-      parts.next.textContent = "flux task check " + file + "\nflux task run " + file + " --passes 1";
+      var calm = opts.calmChecks && !parts.touched;   // nothing typed yet: what is left to do, not errors
+      msgs.forEach(function (m) { parts.checks.appendChild(h("li", { class: "fc-" + (calm && m.level !== "note" ? "todo" : m.level), text: m.text })); });
+      if (parts.next) parts.next.textContent = "flux task check " + file + "\nflux task run " + file + " --passes 1";
     }
 
     function copy() {
@@ -1461,19 +1915,35 @@
     }
 
     host.innerHTML = "";
+    if (readonly) {                                    // the loop at its defaults, nothing to click
+      drawing().forEach(function (el) { host.appendChild(el); });
+      // D726: a running loop's activity over the drawing -- per node id, {state: running|done|
+      // failed, label, title}; `opts.onBox(nodeId)` when a box is clicked
+      parts.activity = opts.activity || {};
+      renderDiagram();
+      return { setActivity: function (m) { parts.activity = m || {}; renderDiagram(); } };
+    }
     parts.form = h("div", { class: "fc-form" });
     parts.code = h("code", {});
     parts.file = h("span", { class: "fc-file" });
     parts.checks = h("ul", { class: "fc-checks" });
-    parts.next = h("code", {});
-    parts.copyBtn = button("Copy", copy, "fc-primary");
+    parts.next = opts.nextSteps === false ? null : h("code", {});
+    parts.copyBtn = button("Copy", copy, opts.save ? "" : "fc-primary");
+    parts.saved = h("span", { class: "fc-hint" });
+    var saveBtn = opts.save ? button(opts.saveLabel || "Save", function () {
+      parts.saved.textContent = "Saving...";
+      Promise.resolve(opts.save(buildYaml(state), state)).then(function (said) { parts.saved.textContent = said || "Saved."; },
+        function (e) { parts.saved.textContent = (e && e.message) || String(e); });
+    }, "fc-primary") : null;
+    var keptNotes = (opts.notes || []).length ? [h("h4", { text: "Kept as written" }),
+      h("ul", { class: "fc-checks" }, opts.notes.map(function (n) { return h("li", { class: "fc-note", text: n }); }))] : [];
     var out = h("div", { class: "fc-output" }, [
-      h("div", { class: "fc-output-head" }, [parts.file, parts.copyBtn, button("Download", download)]),
+      h("div", { class: "fc-output-head" }, [parts.file, saveBtn, parts.copyBtn, button("Download", download), parts.saved]),
       h("pre", { class: "fc-yaml" }, [parts.code]),
-      h("h4", { text: "Checklist" }), parts.checks,
+      h("h4", { text: "Checklist" }), parts.checks].concat(keptNotes).concat(opts.nextSteps === false ? [] : [
       h("h4", { text: "Next steps" }),
       h("p", { class: "fc-hint", text: "Save the file with the files it names, then:" }),
-      h("pre", {}, [parts.next])]);
+      h("pre", {}, [parts.next])]));
     host.appendChild(h("div", { class: "fc-body" }, [parts.form, out]));
     parts.pop = h("div", { class: "fc-pop", role: "dialog", hidden: "hidden" });
     host.appendChild(parts.pop);
@@ -1494,8 +1964,11 @@
 
   var SCRIPT_SRC = document.currentScript && document.currentScript.src;
 
-  /** The tool catalog beside this script (tools.json), then the builder. */
+  /** The drawing alone where a page asks for it; the tool catalog beside this script
+      (tools.json), then the builder. */
   function start() {
+    var still = document.getElementById("flux-loop-drawing");
+    if (still && !still.dataset.mounted) { still.dataset.mounted = "1"; mount(still, true); }
     var host = document.getElementById("flux-crafter");
     if (!host || host.dataset.mounted) return;
     host.dataset.mounted = "1";
@@ -1506,6 +1979,7 @@
     fetch(url).then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
       .then(function (list) { setCatalog(list); go(); }, function () { go(); });
   }
+  root.FluxCrafter = Object.assign({ mount: mount }, api);      // the web configurator mounts it itself (D686)
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
   else start();
   // Material's instant navigation swaps pages without a reload

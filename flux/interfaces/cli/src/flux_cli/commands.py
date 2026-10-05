@@ -158,22 +158,65 @@ def cmd_replay(args: argparse.Namespace) -> int:
 
 def _library_line(task: Any, problem: Any) -> str:
     """What the library holds and who reads it (D648), one line."""
-    from flux_knowledge import status
-    from flux_loop.document import library_on
+    from pathlib import Path
 
-    st = status((task.library,) if task.library else ())
+    from flux_knowledge import status
+    from flux_knowledge.library import library_files
+    from flux_loop.document import LIBRARY_FOLDER, library_folders, library_on
+
+    folders = library_folders(task)
+    st = status(folders)
     if not st["documents"]:
-        return f"library: empty -- drop papers in {st['path']}" + (f" or {task.library}" if task.library else "")
+        return (f"library: empty -- drop papers in {LIBRARY_FOLDER}/ beside the document, "
+                f"or in {st['path']} for every loop")
+    own = sum(len(library_files([f])) - len(library_files()) for f in folders)       # D735: the loop's own
     head = (f"library: {st['documents']} documents ({st['pdfs']} PDFs, pdftotext "
-            f"{'present' if st['pdftotext'] else 'missing'})" + (f", with {task.library}" if task.library else ""))
+            f"{'present' if st['pdftotext'] else 'missing'})"
+            + (f", {own} of them the loop's own ({', '.join(Path(f).name + '/' for f in folders)})" if folders else ""))
     if not library_on(task):
-        return head + ", off (flow.knowledge: none)"
+        return head + ", off (flow.knowledge: off)"
     try:
         mentor = problem.knowledge()
         used = mentor is not None and hasattr(mentor, "source") and mentor.source("library") is not None
     except Exception:  # noqa: BLE001
         used = False
     return head + (", used by: prompts, plan, agents" if used else ", not read by this world's knowledge")
+
+
+def pick_document(path: str) -> str | None:
+    """The document a `task run`/`task check` of a folder means (D787): the folder itself when it
+    holds one problem that loads; with several, the one the user picks at the terminal -- or,
+    with no terminal, None, the problems said."""
+    from pathlib import Path
+
+    from flux_loop import TaskError, load_task
+    from flux_loop.document import ManyDocuments, record_name
+
+    if not Path(path).is_dir():
+        return path
+    try:
+        load_task(path)
+        return path
+    except ManyDocuments as exc:
+        docs, said = exc.documents, str(exc)
+    except TaskError:
+        return path                                   # the command says why, as for one document
+    if not sys.stdin.isatty():
+        print(f"{said}: run one of them --\n" + "\n".join(f"  {d}" for d in docs))
+        return None
+    print(f"{path}: {len(docs)} problems here")
+    for i, d in enumerate(docs, 1):
+        print(f"  {i}. {d.name:<28} record {record_name(d)}")
+    while True:
+        try:
+            got = input(f"which one [1-{len(docs)}]? ").strip()
+        except EOFError:
+            return None
+        if got.isdigit() and 1 <= int(got) <= len(docs):
+            return str(docs[int(got) - 1])
+        hit = [d for d in docs if got in (d.name, d.name.split(".")[0])]
+        if len(hit) == 1:
+            return str(hit[0])
 
 
 def cmd_task_check(args: argparse.Namespace) -> int:
@@ -214,15 +257,6 @@ def cmd_task_check(args: argparse.Namespace) -> int:
     from flux_loop import Objectives
 
     print("  objectives: " + (Objectives(task.objectives).describe() or "none"))    # limits, then what decides (D658)
-    if task.world:
-        from flux_loop.document import contract_lines
-
-        bound = {n for n in problem.__dict__ if callable(problem.__dict__[n]) and not n.startswith("_")}
-        print(f"  world: {task.world} -- fills {len(bound)} hook(s) of the contract ([filled], *core; D561):")
-        for line in contract_lines(bound):
-            print(f"    {line}")
-    for name, spec in sorted(task.hooks.items()):
-        print(f"  hook {name}: {spec}")
     print(f"  record: {task.record}")
     if task.ladder:
         print("  ladder: " + ("the default" if task.ladder is True else ", ".join(f"{k}={v}" for k, v in task.ladder.items())))
@@ -255,6 +289,18 @@ def cmd_task_check(args: argparse.Namespace) -> int:
         return 1
     print("  tools: " + ("present for every stage" if not skipped else
                          "present for the gate and the stages that run (see WILL SKIP above)"))
+    from flux_loop.agent_check import agents_used, check_agent
+
+    unready = []
+    for agent in agents_used(task):                      # D751: the agents it hands work to, set up for you?
+        got = check_agent(agent)
+        bad = next((st for st in got["steps"] if not st["ok"]), None)
+        print(f"  agent {agent}{' ' + got['version'] if got.get('version') else ''}: "
+              + ("set up (`flux agent test " + agent + " --live` asks it)" if bad is None else f"NOT READY: {bad['step']}: {bad['said']}"))
+        if bad is not None:
+            unready.append(agent)
+    if unready:
+        return 1
     from flux_loop.task import model_use
 
     if model_use(task):                                  # the model a run would use, asked now
@@ -286,12 +332,20 @@ def _roles_from(flags: list[str] | None) -> Any:
 
 
 def _drafted_by(task: Any) -> str:
-    """Who writes the candidates: the model unless the document says otherwise."""
+    """Who writes the candidates: the model unless the document says otherwise; a parent's are
+    its sub-loops' (D804: drafted by its model or agent, unless a folder says otherwise)."""
     spec = task.generator
+    if getattr(task, "subtasks", None):
+        if spec.get("command"):
+            return "its sub-loops, composed by the generator command"
+        who = f"the coding agent `{spec['agent']}`" if spec.get("agent") else "a model"
+        return f"its sub-loops, each by {who} unless its folder says otherwise"
     if spec.get("catalog"):
         return f"a catalog of {len(spec['catalog'])} design(s) that already exist (no model)"
     if spec.get("command"):
         return "the generator command (no model)"
+    if spec.get("agent"):
+        return f"the coding agent `{spec['agent']}`"
     return "a model"
 
 
@@ -301,7 +355,8 @@ def _roles_line(task: Any) -> str:
 
     said = dict(task.roles)
     if task.generator and "generator" not in said:
-        said["generator"] = "the document's own generator command/catalog"
+        said["generator"] = (f"the coding agent {task.generator['agent']}" if task.generator.get("agent")
+                             else "the document's own generator command/catalog")
     parts = []
     for role in ROLES:
         chosen = said.get(role)
@@ -367,7 +422,7 @@ def cmd_task_run(args: argparse.Namespace) -> int:
         return 1
     for name, tools in problem.skipped_stages():
         print(f"warning: stage {name} will not run -- needs {', '.join(tools)}, not on PATH")
-    db = args.db or str(task.out_dir() / f"{task.id}.db")          # beside the document, under out/
+    db = args.db or str(task.out_dir() / f"{(task.record or task.id).split('/')[0]}.db")          # beside the document, under out/
     overrides: dict[str, Any] = {"db": db}
     for flag, knob in (("steps", "steps"), ("repair", "repair_attempts"), ("tool_hops", "tool_hops"),
                        ("hop_share", "hop_share"), ("patience", "prototype_patience")):
@@ -456,7 +511,7 @@ def cmd_task_run(args: argparse.Namespace) -> int:
 
     objectives = problem.objectives().describe()       # every limit, then what decides (D660)
     info = {"db": db, "parts": " ".join(problem.subgoals()) or "(one artifact)",
-            "objectives": objectives or "the gate", "world": task.world or "the document alone",
+            "objectives": objectives or "the gate",
             "budget": f"{request.steps} steps x {request.repair_attempts} generation attempts",
             "model": model_name + (" (reasoning on)" if getattr(args, "think", False) else ""),
             "agent": (", ".join(halves) + (f" ({request.tool_hops} hops)" if "tools" in halves else "")
@@ -467,6 +522,9 @@ def cmd_task_run(args: argparse.Namespace) -> int:
         out = demo_run(_passes, tui=tui, title=f"flux · {task.id}", subtitle=db,
                        print_report=_print, info=info)
     except KeyboardInterrupt:
+        from flux_loop.passes import mark
+
+        mark("ended", why="stopped now")
         print("run abandoned; the campaign record holds what was judged")
         return 130
     _print(out)
@@ -478,7 +536,23 @@ def cmd_task_run(args: argparse.Namespace) -> int:
     if getattr(args, "json", None):
         Path(args.json).write_text(json.dumps(_answer(task, db, out, problem, target), indent=2, default=str))
         print(f"answer written to {args.json}")
+    _mark_outputs(task, out, problem, target, getattr(args, "json", None))
     return 0 if out.decision is not None else 1
+
+
+def _mark_outputs(task, out, problem, target: Any, answer: str | None) -> None:
+    """The run's end in its journal (D739): the decision, what it established, the files written."""
+    from flux_loop.passes import mark
+    from flux_loop.task import task_report_lines
+
+    lines = task_report_lines(task, out, problem)
+    head = next((i for i, ln in enumerate(lines) if ln.strip().startswith("WHAT THIS RUN ESTABLISHED")), None)
+    established = [ln.strip() for ln in lines[head + 1:] if ln.strip()][:20] if head is not None else []
+    dec = out.decision
+    mark("outputs", stopped=out.stopped, decided_by=out.decided_by,
+         decision=({"name": dec.candidate.name, "stage": dec.stage, "metrics": dec.metrics} if dec is not None else None),
+         front=len(out.frontier), refused=len(out.refused), lessons=list(out.lessons)[-12:], established=established,
+         not_established=list(out.not_established)[:12], design=str(target) if target else None, answer=answer)
 
 
 def _answer(task, db: str, out, problem, artifact: Any) -> dict[str, Any]:
@@ -498,9 +572,6 @@ def _answer(task, db: str, out, problem, artifact: Any) -> dict[str, Any]:
         "refused": [{"name": n, "why": why} for n, why in out.refused],
         "not_established": list(out.not_established), "lessons": list(out.lessons),
         "report": task_report_lines(task, out, problem)}
-    world = getattr(problem, "world", None)
-    if world is not None and callable(getattr(world, "result", None)):
-        answer["result"] = world.result(out)
     return answer
 
 
@@ -532,8 +603,8 @@ def cmd_ask(args: argparse.Namespace) -> int:
         args.passes, args.screen_only, args.dir = settings["passes"], settings["screen_only"], settings["workdir"]
         args.skill = settings.get("skills", args.skill)
         review = bool(settings["review"])
-    slug = _re.sub(r"[^a-z0-9]+", "-", args.prompt.lower()).strip("-")[:40] or "ask"
-    workdir = Path(args.dir or Path("out") / f"ask-{slug}").resolve()
+    slug = _re.sub(r"[^a-z0-9]+", "_", args.prompt.lower()).strip("_")[:40] or "ask"
+    workdir = Path(args.dir or Path("out") / f"ask_{slug}").resolve()       # D786: its name is the problem's id
     from flux_loop.author import workspace_skills
     from flux_loop.skills import SkillError
 
@@ -581,7 +652,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
     def run_pass(task: Any, problem: Any, explore: int = 0) -> Any:
         if args.no_run:
             raise _NoRun()
-        overrides: dict[str, Any] = {"db": str(task.out_dir() / f"{task.id}.db"), "explore": explore}
+        overrides: dict[str, Any] = {"db": str(task.out_dir() / f"{(task.record or task.id).split('/')[0]}.db"), "explore": explore}
         if args.steps is not None:
             overrides["steps"] = args.steps
         if args.screen_only:
@@ -870,8 +941,10 @@ def cmd_stop(args: argparse.Namespace) -> int:
 
     cid = _campaign_of(args.db, args.campaign)
     if args.now:
+        st = ops.status(cid, args.db)
         if ops.interrupt(cid, args.db):
-            print(f"campaign {cid[:12]}: SIGINT sent to pid {ops.status(cid, args.db).get('pid')}; the pass ends now, the record holds what was judged")
+            to = f"the sandbox {st['container']}" if st.get("container") else f"pid {st.get('pid')}"
+            print(f"campaign {cid[:12]}: SIGINT sent to {to}; the pass ends now, the record holds what was judged")
             return 0
         print(f"campaign {cid[:12]}: no running process registered")
         return 1
@@ -947,12 +1020,12 @@ A Python problem for Flux, written by `flux new {name} --kind python`. The model
 
 | file | what it is |
 |---|---|
-| `{name}.problem.yaml` | the ask: statement, contract, gate, stage, objective, budget |
+| `problem.yaml` | the ask: statement, contract, gate, stage, objective, budget |
 | `check.py` | the gate: known cases against a reference, prints `N failing of M` |
 | `bench.py` | the stage: times the candidate, prints `time_ms=` |
 
-    flux task check {name}.problem.yaml
-    flux task run {name}.problem.yaml --passes 1      # one pass; without --passes it runs until stopped
+    flux task check problem.yaml
+    flux task run problem.yaml --passes 1      # one pass; without --passes it runs until stopped
 
 A model is needed: a local Ollama, or `FLUX_REMOTE_BASE_URL` / `FLUX_REMOTE_MODEL` for a server
 (README.md, "A run with a model"). To make it yours, change the statement and the contract,
@@ -966,11 +1039,11 @@ it with Yosys and OpenSTA, then places it with OpenROAD on ASAP7 (the stages).
 
 | file | what it is |
 |---|---|
-| `{name}.problem.yaml` | the ask: statement, contract, gate, stages, objectives, budget |
+| `problem.yaml` | the ask: statement, contract, gate, stages, objectives, budget |
 | `golden.py` | what the module must compute: `PORTS` and `golden(**inputs)` |
 
-    flux task check {name}.problem.yaml
-    flux task run {name}.problem.yaml --passes 1 --screen-only    # synthesis only, one pass
+    flux task check problem.yaml
+    flux task run problem.yaml --passes 1 --screen-only    # synthesis only, one pass
 
 It needs the dev shell's tools and a model. To make it yours, change the statement, the
 contract and `golden.py`; `flux/core/loop/src/flux_loop/author_reference.md` has the rules for
@@ -979,37 +1052,37 @@ golden models (floats, clocks, tolerances).
     "rtl-sweep": """# {name}
 
 A hardware design-space sweep for Flux with no model, written by `flux new {name} --kind
-rtl-sweep`. `gen.py` spells one module per point of the document's `space:`; `flux rtl test`
+rtl-sweep`. `gen.py` spells one module per point of the document's `flow.dse.space`; `flux rtl test`
 proves each against `golden.py` on Verilator; `flux rtl measure` synthesises the survivors with
 Yosys and OpenSTA on ASAP7.
 
 | file | what it is |
 |---|---|
-| `{name}.problem.yaml` | the space, the search, the gate, the stage, the objectives |
+| `problem.yaml` | the space, the search, the gate, the stage, the objectives |
 | `gen.py` | the generator: a 16-bit popcount as a sum, an adder tree, or small tables |
 | `golden.py` | what the module must compute |
 
-    flux task run {name}.problem.yaml --passes 1
+    flux task run problem.yaml --passes 6      # a pass a point of `flow.dse.space` (D738)
 
-Add an architecture to `gen.py` and its name to `space:`, or add knobs (widths, pipeline
+Add an architecture to `gen.py` and its name to `flow.dse.space`, or add knobs (widths, pipeline
 depth, table size). For placed numbers, add the `confirm` stage from `flux new --kind rtl`.
 """,
     "tune": """# {name}
 
 A tuning problem for Flux, written by `flux new {name} --kind tune`. No model and no generated
-code: every point of the document's `space:` is a setting, handed to the gate and the stage as
+code: every point of the document's `flow.dse.space` is a setting, handed to the gate and the stage as
 `{{knob}}` placeholders. `check.py` refuses a setting that breaks the result; `bench.py` measures
 the rest; the fastest wins.
 
 | file | what it is |
 |---|---|
-| `{name}.problem.yaml` | the knobs, the search, the gate, the stage, the objective |
+| `problem.yaml` | the knobs, the search, the gate, the stage, the objective |
 | `workload.py` | the program being tuned: a blocked matrix multiply (block size, loop order) |
 | `check.py` / `bench.py` | the gate (still correct?) and the stage (`time_ms=`) |
 
-    flux task run {name}.problem.yaml --passes 1
+    flux task run problem.yaml --passes 15      # a pass a point of `flow.dse.space` (D738)
 
-To tune your own program, replace `workload.py`, list its knobs under `space:`, and make the gate
+To tune your own program, replace `workload.py`, list its knobs under `flow.dse.space`, and make the gate
 and the stage run it with them. They can be any command: a build with flags, a solver with
 parameters, a training script with hyperparameters. For a space too big to sweep, set
 `flow.dse` to `gradient`, `anneal` or `genetic`; for a trade-off, add a second objective and use
@@ -1018,22 +1091,45 @@ parameters, a training script with hyperparameters. For a space too big to sweep
     "sweep": """# {name}
 
 A design-space sweep for Flux with no model, written by `flux new {name} --kind sweep`.
-`render.py` writes one candidate per point of the document's `space:`; `check.py` refuses a
+`render.py` writes one candidate per point of the document's `flow.dse.space`; `check.py` refuses a
 wrong one; `bench.py` times the survivors; the fastest wins.
 
 | file | what it is |
 |---|---|
-| `{name}.problem.yaml` | the ask: the space, the search, the gate, the stage, the objective |
+| `problem.yaml` | the ask: the space, the search, the gate, the stage, the objective |
 | `render.py` | the generator: one candidate per point (`render.py <out> <algorithm> <wheel>`) |
 | `check.py` / `bench.py` | the gate and the stage |
 
-    flux task run {name}.problem.yaml --passes 1
+    flux task run problem.yaml --passes 6      # a pass a point of `flow.dse.space` (D738)
 
-To try another idea, add a value to `space:` and its code to `render.py`; to search instead of
+To try another idea, add a value to `flow.dse.space` and its code to `render.py`; to search instead of
 sweeping, set `flow.dse` to `gradient`, `anneal`, `genetic` or `pareto`. Set
-`flow.generate: model` (and drop `space:`) to let a model write candidates instead.
+`flow.generate: model` (and drop `flow.dse`) to let a model write candidates instead.
 """,
 }
+
+
+#: What each `flux new` kind is, in a line (the web's "Start from an example", D719).
+NEW_KINDS = {
+    "sweep": "A script writes every point of a knob space; the fastest wins. No model needed.",
+    "tune": "Knobs go straight to your own commands (build flags, block sizes). No model needed.",
+    "python": "A model writes a Python function; a checker and a benchmark judge it.",
+    "rtl": "A model writes a SystemVerilog module; Verilator and ASAP7 synthesis judge it.",
+    "rtl-sweep": "A script spells one module per knob point; Verilator and Yosys judge them. No model needed.",
+}
+
+
+def template_files(name: str, kind: str) -> list[tuple[str, str]]:
+    """`flux new`'s problem of `kind` named `name`: (file name, text) pairs, the document as
+    `problem.yaml` (D786: in a folder named `name`, its id), and its README."""
+    from pathlib import Path
+
+    if kind not in NEW_KINDS:
+        raise ValueError(f"a kind is one of {', '.join(NEW_KINDS)}")
+    source = Path(__file__).with_name("templates") / kind
+    out = [(f.name, f.read_text().replace("__NAME__", name))
+           for f in sorted(source.iterdir()) if f.is_file()]
+    return [*out, ("README.md", _NEW_README[kind].format(name=name))]
 
 
 def cmd_new(args: argparse.Namespace) -> int:
@@ -1046,26 +1142,30 @@ def cmd_new(args: argparse.Namespace) -> int:
     if not _re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", name):
         print(f"flux new: {name!r} is not a name (a letter, then letters, digits or _)")
         return 2
-    target = Path(args.dir or name)
+    target = Path(args.dir) / name if args.dir else Path(name)     # D786: the folder is the problem, its name the id
     if target.exists() and any(target.iterdir()):
-        print(f"flux new: {target} exists and is not empty; choose another --dir")
+        print(f"flux new: {target} exists and is not empty; choose another name or --dir")
         return 2
     target.mkdir(parents=True, exist_ok=True)
-    source = Path(__file__).with_name("templates") / args.kind
     written = []
-    for f in sorted(source.iterdir()):
-        if not f.is_file():
-            continue
-        out = target / (f"{name}.problem.yaml" if f.name == "problem.yaml" else f.name)
-        out.write_text(f.read_text().replace("__NAME__", name))
-        written.append(out.name)
-    (target / "README.md").write_text(_NEW_README[args.kind].format(name=name))
-    written.append("README.md")
-    doc = target / f"{name}.problem.yaml"
+    for rel, text in template_files(name, args.kind):
+        (target / rel).write_text(text)
+        written.append(rel)
+    doc = target
     print(f"wrote {target}/: {', '.join(written)}")
-    print(f"next:\n  flux task check {doc}\n  flux task run {doc} --passes 1"
+    points = {"sweep": 6, "rtl-sweep": 6, "tune": 15}.get(args.kind, 1)     # D738: a pass a point
+    print(f"next:\n  flux task check {doc}\n  flux task run {doc} --passes {points}"
           + (" --screen-only" if args.kind == "rtl" else ""))
     return 0
+
+
+def cmd_probe(args: argparse.Namespace) -> int:
+    """`flux probe gate|measure FILE`: an agent's check through the loop's own tools (D678)."""
+    from flux_loop.probe import probe
+
+    code, text = probe(args.what, args.file, args.stage, gate_first=getattr(args, "gate", False))
+    print(text)
+    return code
 
 
 def cmd_log(args: argparse.Namespace) -> int:
@@ -1121,3 +1221,29 @@ def cmd_log(args: argparse.Namespace) -> int:
                 print(f"  tool: {h[:160]}")
             print(f"  reply ({len(reply)} chars): {flat(reply)[:200]}")
     return 0
+
+
+def cmd_consult(args: argparse.Namespace) -> int:
+    """`flux consult "<question>" --loop <folder> --out <folder>`: an agent (or the model) reads the
+    loop -- its files, a snapshot of its record, its log -- and answers in `<out>/answer.md` (D705)."""
+    from pathlib import Path
+
+    from flux_loop.consult import consult
+
+    loop, out = Path(args.loop).resolve(), Path(args.out).resolve()
+    if not loop.is_dir():
+        print(f"flux consult: no loop folder {loop}")
+        return 2
+    proposer = None
+    if args.author in (None, "", "model"):
+        from flux_llm import OpenAIChatProposer
+
+        proposer = OpenAIChatProposer(args.model, num_predict=6000)
+        down = proposer.preflight()
+        if down:
+            print(f"cannot answer: {down}")
+            return 1
+    print(f"consult: {args.question}\nthe loop: {loop}\nthe answer: {out / 'answer.md'}\nwho answers: {args.author}", flush=True)
+    got = consult(args.question, loop, out, author=args.author, proposer=proposer)
+    print("\n" + got["answer"])
+    return 0 if got["ok"] else 1

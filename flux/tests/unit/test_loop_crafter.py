@@ -136,14 +136,19 @@ for (const kind of ["surrogate", "command", "model"]) {
 // every box that can be a coding agent, and the library off
 s = JSON.parse(JSON.stringify(out.rtl_one_gate.state)); s.id = "agents_everywhere";
 for (const b of c.DELEGABLE) if (b !== "dse") s.flow[b] = "agent:claude";
-s.flow.knowledge = "none"; s.flow.critique = "llm";
+s.flow.knowledge = "none"; s.flow.critique = "model";
 add("agents_everywhere", "rtl", s);
+s = JSON.parse(JSON.stringify(out.rtl_one_gate.state)); s.id = "papers_by_agent"; s.flow.digest = "agent:opencode";   // D773
+add("papers_by_agent", "rtl", s);
+out.readback = {papers: c.fromDoc({id: "r", statement: "s", flow: {knowledge: {files: ["a.md"], agent: "opencode"}}}, null)};
+out.boxes = Object.fromEntries(Object.keys(c.BOXES).map(b => [b, {title: c.BOXES[b].title, says: c.BOXES[b].says,
+                                                                 flow: c.FLOW_BOXES.includes(b), values: c.BOXES[b].choices.map(x => x.value)}]));
 out.fixed = Object.fromEntries(["test", "measure", "records", "select", "critique", "calibrate"].map(b => [b, c.isFixed(b)]));
 out.defaults = {orchestrate: c.BOXES.orchestrate.choices[0].label, knowledge: c.BOXES.knowledge.choices[0].label,
-                extract: c.BOXES.extract.choices[0].value, flowBoxes: c.FLOW_BOXES};
+                lessons: c.BOXES.lessons.choices[0].value, flowBoxes: c.FLOW_BOXES};
 
 // the defaults, as `flux task check` says them: an otherwise empty problem with one check
-const BOXES_EXPLAINED = ["validate", "orchestrate", "plan", "generate", "critique", "calibrate", "feedback", "knowledge", "extract", "records"];
+const BOXES_EXPLAINED = ["validate", "orchestrate", "plan", "generate", "critique", "calibrate", "feedback", "knowledge", "lessons", "records"];
 const explained = st => Object.fromEntries(BOXES_EXPLAINED.map(b => [b, c.explain(b, st)]));
 s = c.base(); s.id = "defaults"; s.statement = "Anything."; s.checks.push(c.newCheck(s, "custom"));
 s.checks[0].params.command = "{python} {home}/golden.py";
@@ -151,7 +156,7 @@ out.explained = {};
 add("empty_problem", "rtl", s, {partial: true}); out.explained.empty_problem = explained(s);
 s = JSON.parse(JSON.stringify(s)); s.id = "empty_parts"; s.partsMode = "decompose";
 add("empty_parts", "rtl", s, {partial: true}); out.explained.empty_parts = explained(s);
-s = JSON.parse(JSON.stringify(out.empty_problem.state)); s.id = "empty_off"; s.flow.feedback = "none"; s.flow.knowledge = "none";
+s = JSON.parse(JSON.stringify(out.empty_problem.state)); s.id = "empty_off"; s.flow.feedback = "off"; s.flow.knowledge = "none";
 add("empty_off", "rtl", s, {partial: true}); out.explained.empty_off = explained(s);
 s = JSON.parse(JSON.stringify(out.rtl_one_gate.state)); s.id = "estimates_said";
 s.stages[0].estimate = {kind: "surrogate", margin: "5", command: ""};
@@ -208,10 +213,13 @@ def _load(tmp_path: Path, case: dict, pending: bool = False):
     (cutoff lists, objective limits) skips instead of failing."""
     src, files = FILES[case["files"]]
     doc_id = case["state"]["id"]
+    home = tmp_path / doc_id                                # D786: the folder is the id
+    home.mkdir(exist_ok=True)
     for f in files:
-        (tmp_path / f).write_text((src / f).read_text().replace("__NAME__", doc_id))
-    doc = tmp_path / f"{doc_id}.problem.yaml"
+        (home / f).write_text((src / f).read_text().replace("__NAME__", doc_id))
+    doc = home / "problem.yaml"
     doc.write_text(case["yaml"])
+    (home / "library").mkdir(exist_ok=True)                 # D791: the loop's library
     try:
         return load_task(doc)
     except (TaskError, TypeError, ValueError) as exc:
@@ -320,7 +328,7 @@ def test_maximising_fmax_at_a_fixed_clock_warns_unless_the_clock_is_searched(tmp
 
 def test_a_catalog_stage_without_run_writes_its_stage_shape(tmp_path):
     y = BUILT["evaluated"]["yaml"]
-    assert "evaluator: zigzag" in y and "command:" not in y.split("stages:")[1]
+    assert "evaluator: zigzag" in y and "command:" not in y.split("measure:")[1]
     t = _load(tmp_path, BUILT["evaluated"])
     assert t.stages[0].evaluator == "zigzag" and t.stages[0].command is None
     assert set(t.stages[0].metrics) == {"latency_cycles", "energy_pj"}
@@ -365,11 +373,18 @@ def test_the_drawing_writes_no_removed_box_and_fixes_single_choice_boxes(tmp_pat
     assert BUILT["fixed"] == {"test": True, "measure": True, "records": True, "select": False, "critique": False, "calibrate": False}
     assert "analytical" not in BUILT["defaults"]["flowBoxes"] and "simulation" not in BUILT["defaults"]["flowBoxes"]
     assert "the model picks the next part, rules pick the kind of work" in BUILT["defaults"]["orchestrate"]
-    assert "library" in BUILT["defaults"]["knowledge"] and BUILT["defaults"]["extract"] == "none"
+    assert "library" in BUILT["defaults"]["knowledge"] and BUILT["defaults"]["lessons"] == "off"
     y = BUILT["agents_everywhere"]["yaml"]
-    assert "knowledge: none" in y and "critique: llm" in y and "test:" not in y.split("flow:")[1].split("gate:")[0]
+    assert "knowledge: {\"off\": true, lessons: {by: claude}}" in y and "critique: model" in y and "test: {agent" not in y
     t = _load(tmp_path, BUILT["agents_everywhere"])
     assert t.flow["knowledge"] == ["none"] and t.flow["select"] == {"agent": "claude"}
+    p = BUILT["papers_by_agent"]
+    assert "knowledge: {by: opencode}" in p["yaml"] and not _errors(p), p["yaml"]
+    assert _load(tmp_path, p).digest_by == "opencode", "D773: the configurator's Background reading by an agent loads as one"
+    assert "digest" not in BUILT["rtl_one_gate"]["yaml"], "D791: the model digests unsaid"
+    r = BUILT["readback"]["papers"]
+    assert (r["state"]["knowledgeFiles"], r["state"]["flow"]["digest"]) == ("a.md", "agent:opencode")
+    assert not r["kept"], "D781, D791: the files and who digests are the configurator's own"
 
 
 def test_pareto_needs_two_objectives_and_an_estimate_its_margin_and_command():
@@ -402,3 +417,34 @@ def test_the_estimates_say_what_task_check_says(tmp_path):
     t = _load(tmp_path, BUILT["estimates_said"])
     said = [describe_stage(st).split(" -- estimate: ", 1)[1] for st in t.stages]
     assert said == BUILT["explained"]["estimates"]
+
+
+def test_the_loop_page_lists_the_crafters_boxes():
+    """guide/loop-shape.md shows the crafter's drawing and explains it: its table has one row per
+    box of the drawing, under the drawing's title, with the box's `flow:` key and every word the
+    crafter can write for it."""
+    page = (REPO / "website/docs/guide/loop-shape.md").read_text()
+    assert 'id="flux-loop-drawing"' in page and "assets/crafter.js" in page
+    rows = {}
+    for line in page.split("## The boxes", 1)[1].split("### ", 1)[0].splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if line.startswith("|") and len(cells) == 4 and not set(cells[0]) <= set("-"):
+            rows[cells[0]] = cells
+    rows.pop("box")
+    boxes = BUILT["boxes"]
+    assert sorted(rows) == sorted(b["title"] for b in boxes.values())
+    for key, box in boxes.items():
+        _, flow_key, does, choices = rows[box["title"]]
+        written = {"dse": "orchestrate"}.get(key, key)        # D797: the search is said as `orchestrate`
+        assert flow_key == (f"`{written}`" if box["flow"] else ""), key
+        assert does.startswith(box["says"]), (key, does)
+        said = set(re.findall(r"`\{?(\w+)", choices))
+        for value in box["values"]:
+            if value == "default" or value.startswith("agent:") or len(box["values"]) == 1:
+                continue                                # unsaid, `{agent: ...}` (below the table), fixed
+            assert value in said, (key, value, choices)
+        if any(v.startswith("agent:") for v in box["values"]):
+            assert "coding agent" in choices, key
+        if len(box["values"]) == 1:
+            assert "**fixed**" in choices, key
+

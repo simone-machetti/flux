@@ -176,13 +176,14 @@ def test_a_task_document_can_carry_the_division(tmp_path):
     """Sub-tasks are nested documents that inherit what they do not say, never `subtasks` itself."""
     from flux_loop import PromptProblem, TaskError, TaskSpec
 
-    spec = TaskSpec.from_dict({
-        "id": "top", "statement": "make a thing", "contract": "be careful",
-        "gate": {"test": ["true"]},
-        "stages": [{"name": "screen", "command": ["true"], "metrics_re": {"m": r"m=(\d+)"}}],
-        "subtasks": [{"id": "sim", "statement": "model it"},
-                     {"id": "arch", "statement": "build it", "gate": {"test": ["false"]}}],
-    })
+    spec = TaskSpec.from_dict({"id": "top",
+                               "statement": "make a thing",
+                               "contract": "be careful",
+                               "subtasks": [{"id": "sim", "statement": "model it"}, {"id": "arch",
+                                                                                     "statement": "build it",
+                                                                                     "flow": {"test": {"test": ["false"]}}}],
+                               "flow": {"test": {"test": ["true"]},
+                                        "measure": {"screen": {"command": ["true"], "metrics_re": {"m": 'm=(\\d+)'}}}}})
     assert [c.id for c in spec.subtasks] == ["sim", "arch"]
     assert spec.subtasks[0].contract == "be careful" and spec.subtasks[0].gate.named("test").run == ("true",)
     assert spec.subtasks[1].gate.named("test").run == ("false",), "a child may say its own gate"
@@ -193,8 +194,11 @@ def test_a_task_document_can_carry_the_division(tmp_path):
     assert [w.name for w in work] == ["sim", "arch"]
     assert all(isinstance(w, SubLoop) for w in work)
     with pytest.raises(TaskError, match="cannot both"):
-        TaskSpec.from_dict({"id": "t", "statement": "s", "gate": {"test": ["true"]},
-                            "parts": "decompose", "subtasks": "decompose"})
+        TaskSpec.from_dict({"id": "t",
+                            "statement": "s",
+                            "parts": "decompose",
+                            "subtasks": "decompose",
+                            "flow": {"test": {"test": ["true"]}}})
 
 
 def test_a_document_can_ask_the_orchestrator_to_split_it():
@@ -202,10 +206,11 @@ def test_a_document_can_ask_the_orchestrator_to_split_it():
     from flux_loop import LoopState, PromptProblem, TaskSpec
     from flux_llm import ScriptedProposer
 
-    spec = TaskSpec.from_dict({
-        "id": "top", "statement": "make a thing", "gate": {"test": ["true"]},
-        "subtasks": "decompose", "max_subtasks": 3,
-    })
+    spec = TaskSpec.from_dict({"id": "top",
+                               "statement": "make a thing",
+                               "subtasks": "decompose",
+                               "max_subtasks": 3,
+                               "flow": {"test": {"test": ["true"]}}})
     problem = PromptProblem(spec)
     proposer = ScriptedProposer(['{"subtasks": [{"name": "front", "statement": "the front"},'
                                  ' {"name": "back", "statement": "the back"}], "why": "two ends"}'])
@@ -220,3 +225,59 @@ def test_a_document_can_ask_the_orchestrator_to_split_it():
     again = problem.decompose(state)
     assert [w.name for w in again] == ["front", "back"] and len(proposer.prompts) == 1, (
         "asked once: the division a pass works on does not change under it")
+
+
+def _two(tmp_path, compose: bool):
+    """A parent with two sub-loops in folders, each its own check over one shared stage (D801)."""
+    home = tmp_path / "two"
+    for d, n, words in (("short", 3, ("abcd", "ab")), ("long", 6, ("abcdefgh", "abcde"))):
+        (home / "ops" / d).mkdir(parents=True)
+        (home / "ops" / d / "check.py").write_text(
+            "import sys\nprint(int(len(open(sys.argv[1]).read().strip()) > int(sys.argv[2])), 'failing')\n")
+        for w in words:
+            (home / "ops" / d / f"{w}.txt").write_text(w + "\n")
+        (home / "ops" / d / "problem.yaml").write_text(
+            f"statement: a word of at most {n} letters\nflow:\n"
+            f"  generate: {{catalog: [{words[0]}.txt, {words[1]}.txt]}}\n"
+            f"  test: \"{{python}} {{home}}/check.py {{artifact}} {n}\"\n")
+    (home / "compose.py").write_text(
+        "import json, sys\nparts = json.load(open(sys.argv[1]))\n"
+        "open(sys.argv[2], 'w').write('+'.join(open(p).read().strip() for p in parts.values()) + '\\n')\n")
+    (home / "problem.yaml").write_text(
+        "statement: two words, each judged by its own check\nlanguage: text\n"
+        "objectives: [{metric: chars, direction: maximize}]\nsubtasks: [ops/short, ops/long]\nflow:\n"
+        + ("  generate: {command: \"{python} {home}/compose.py {parts} {artifact}\"}\n" if compose else "")
+        + "  measure:\n    len: {command: \"{python} -c \\\"import sys; print('chars=' + str(len(open(sys.argv[1]).read().strip())))\\\" {artifact}\","
+        " metrics: [chars]}\nbudget: {prototype: false, steps: 4}\n")
+    return home
+
+
+def test_sub_loops_in_folders_override_their_parent_box_by_box(tmp_path):
+    """D801: a child in a folder says only what differs -- its own `test` -- and keeps the
+    parent's stage; its id is its folder, its home the folder; the parent judges nothing itself."""
+    from flux_loop import load_task
+
+    task = load_task(_two(tmp_path, compose=False))
+    short, long_ = task.subtasks
+    assert (short.id, long_.id) == ("short", "long") and short.home.endswith("ops/short")
+    assert [s.name for s in short.stages] == ["len"], "the parent's stage, inherited"
+    assert "3" in " ".join(list(short.gate)[0].run) and "6" in " ".join(list(long_.gate)[0].run)
+    assert short.record == "two/short" and not list(task.gate)
+    assert task.to_dict()["subtasks"] == ["ops/short", "ops/long"], "written back as the folders"
+    # D805: one workbench for the parent and its sub-loops, as one out/ -- also run alone
+    wb = str((tmp_path / "two" / "workbench").resolve())
+    assert task.workbench == short.workbench == long_.workbench == wb
+    alone = load_task(tmp_path / "two" / "ops" / "short")
+    assert alone.workbench == wb and alone.out_dir() == tmp_path / "two" / "out"
+
+
+def test_the_parents_generate_composes_the_sub_loops(tmp_path):
+    """D801: the parent's `generate: {command}` gets `{parts}` -- each sub-loop's answer -- and
+    writes the whole, which the parent measures; no child inherits it."""
+    from flux_loop import PromptProblem, load_task, request_for, run_loop
+
+    task = load_task(_two(tmp_path, compose=True))
+    assert all("generate" not in (c.flow or {}) or c.generator.get("catalog") for c in task.subtasks)
+    out = run_loop(PromptProblem(task), request_for(task, db=str(tmp_path / "t.db")), log=lambda _m: None)
+    assert out.decision is not None and out.decision.candidate.artifact == "ab+abcde\n"
+    assert out.decision.metrics["chars"] == 8

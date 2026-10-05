@@ -54,9 +54,32 @@ from fnmatch import fnmatchcase
 from typing import Any, Iterator
 
 from .roles import Rules, register
+
+#: A proposed point not yet made into a design (D739): `instantiate_taken` makes it.
+POINT = "_point"
+
+
+def instantiate_taken(problem: Any, state: Any, cands: list[Candidate]) -> list[Candidate]:
+    """The designs for the candidates a pass takes: proposed points made by the problem's
+    `instantiate` (all at once, so a world that generates a batch still does), the rest as
+    they are. A point the problem could not make is dropped, as before."""
+    points = [c for c in cands if c.meta.get(POINT)]
+    if not points:
+        return list(cands)
+    made = {_key(c.knobs): c for c in problem.instantiate([dict(c.knobs) for c in points], state)}
+    out = []
+    for c in cands:
+        if not c.meta.get(POINT):
+            out.append(c)
+            continue
+        m = made.get(_key(c.knobs))
+        if m is not None:
+            m.meta.setdefault("strategy", c.meta.get("strategy"))
+            out.append(m)
+    return out
 from .types import Candidate, Scored
 
-__all__ = ["Anneal", "Control", "Genetic", "Gradient", "ModelSearch", "MonteCarlo", "Pareto", "Phases", "Policy",
+__all__ = ["Anneal", "CommandSearch", "Control", "Genetic", "Gradient", "ModelSearch", "MonteCarlo", "Pareto", "Phases", "Policy",
            "Sweep", "neighbour", "points", "point_of", "validate_phase"]
 
 
@@ -179,16 +202,17 @@ class Policy(Rules):
     def search(self, problem: Any, state: Any) -> Iterator[list[Candidate]] | None:
         space = {k: list(v) for k, v in dict(problem.space(state) or {}).items() if v}
         if not space:
-            state.say(f"  {self.name}: no `space:` is declared and the world names none; nothing to search")
+            state.say(f"  {self.name}: no `flow.dse.space` is declared and the world names none; nothing to search")
             return None
-        seen = {_key(point_of(s.candidate)) for s in state.scored if point_of(s.candidate)}
         self._space, self._when = space, dict(getattr(getattr(problem, "task", None), "when", None) or {})
         seeds = [dict(p) for p in (getattr(problem, "seeds", None) or (lambda _s: []))(state) or []]
         self._home = dict(seeds[0]) if seeds else {}
-        return self._seeded(problem, state, space, seen, seeds)
+        return self._seeded(problem, state, space, seeds)
 
-    def _seeded(self, problem, state, space, seen, seeds):
-        """The seeds first (D583), once, then the walk."""
+    def _seeded(self, problem, state, space, seeds):
+        """The seeds first (D583), once, then the walk. What is measured is read when the walk
+        starts, so a resumed record's points (D682) count as seen."""
+        seen = {_key(point_of(s.candidate)) for s in state.scored if point_of(s.candidate)}
         state.dse.append({"label": "seed", "points": seeds})
         fresh = [p for p in seeds if _key(p) not in seen]
         if fresh:
@@ -219,10 +243,12 @@ class Policy(Rules):
                 continue
             seen.add(k)
             fresh.append(p)
-        cands = list(problem.instantiate(fresh, state)) if fresh else []
-        for c in cands:
-            c.meta.setdefault("strategy", label or self.tag)
-        return cands
+        # D739: points, not designs -- a pass makes the ones it takes (`instantiate_taken`), so a
+        # sweep's 6 designs are written over its 6 passes, not all in the first
+        from .document import _point_name
+
+        return [Candidate(name=_point_name(p), knobs=dict(p),
+                          meta={"strategy": label or self.tag, POINT: True}) for p in fresh]
 
     def objective(self, problem: Any, state: Any) -> tuple[str, float] | None:
         """(metric, sign): the value times sign is what a policy MINIMISES."""
@@ -335,6 +361,8 @@ class Sweep(Policy):
             pts = points(space)
         pts = list({_key(p): p for p in map(self.canon, pts)}.values())
         todo = [p for p in pts if _key(p) not in seen]
+        if not todo:
+            state.search_done = True                  # every point is on record: nothing to propose
         size = int(self.batch_size) or max(1, len(todo))
         state.say(f"  sweep: {len(todo)} point(s) of {len(pts)}"
                   + (f" (over {', '.join(moving)})" if len(moving) < len(space) else "") + f", {size} a batch")
@@ -840,6 +868,115 @@ def validate_phase(spec: Any) -> None:
     make_phase(spec)
 
 
+@dataclass
+class CommandSearch(Policy):
+    """A search a command runs (D799): the document's own chain of tries -- a solver, a proof,
+    a model it asks itself -- as a script beside it. Each round the loop writes `{history}`, a
+    JSON file of everything measured and refused so far (name, knobs, stage, metrics, why), and
+    keeps `{state}`, a JSON file the command may read and write between rounds; the command
+    prints one JSON object (its last line that is one):
+
+        {"candidates": [{"name", "artifact", "knobs"?, "why"?, "by"?}],
+         "lessons": [...], "not_established": [...], "conclusion": {...}?, "done": false}
+
+    The candidates go through the gate and the stages like any; `done` (or no candidates) ends
+    the search; a `conclusion` is recorded as the run's answer when nothing was decided (a
+    partial answer, a proof that none exists)."""
+
+    name: str = "command"
+    run: Any = ""
+    timeout_s: float = 600.0
+
+    def search(self, problem: Any, state: Any) -> Iterator[list[Candidate]] | None:
+        if not self.run:
+            state.say("  command search: no `run` command")
+            return None
+        return self._rounds(problem, state)
+
+    def _history(self, state: Any) -> dict[str, Any]:
+        measured = [{"name": s.candidate.name, "knobs": dict(s.candidate.knobs or {}), "stage": s.stage,
+                     "metrics": dict(s.metrics), "by": s.candidate.meta.get("strategy", "")} for s in state.scored]
+        refused = [{"name": n, "why": why} for n, why in state.refused]
+        records = getattr(state, "records", None)             # a resumed record's refusals too
+        if records is not None and getattr(records, "resumed", False):
+            have = {r["name"] for r in refused}
+            for cand, why in records.refusals(limit=500):
+                name = str(cand.get("name") or "")
+                if name and name not in have:
+                    have.add(name)
+                    refused.insert(0, {"name": name, "why": why})
+        drain = getattr(state, "drain", None)                 # the operator's notes, for a model the command asks
+        guidance = drain() if callable(drain) else None
+        return {"measured": measured, "refused": refused, "guidance": guidance or ""}
+
+    def _rounds(self, problem: Any, state: Any) -> Iterator[list[Candidate]]:
+        import json
+        from pathlib import Path
+
+        from .document import _command
+
+        task = getattr(problem, "task", None)
+        out_dir = task.out_dir() if task is not None and callable(getattr(task, "out_dir", None)) else Path(state.workdir or ".")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        keep = out_dir / f"{getattr(task, 'record', '') or 'search'}.search-state.json"
+        history = Path(state.workdir or out_dir) / "search-history.json"
+        cmd = tuple(_command(self.run, "flow.orchestrate.command"))
+        rounds = 0
+        while True:
+            rounds += 1
+            history.parent.mkdir(parents=True, exist_ok=True)
+            history.write_text(json.dumps({**self._history(state), "round": rounds}, indent=1, default=str))
+            subs = {"history": str(history), "state": str(keep), "workdir": str(history.parent),
+                    "home": getattr(task, "home", "") or ".", "python": __import__("sys").executable,
+                    "artifact": "", "name": "search", "part": "", "point": ""}
+            got = problem._run(cmd, subs, self.timeout_s, "search")
+            said = _last_json((got.stdout or ""))
+            if not got.ok or said is None:
+                tail = ((got.stdout or "") + "\n" + (got.stderr or "")).strip()[-300:]
+                state.not_established.append(f"the search command stopped (exit {got.returncode}): {tail}")
+                return
+            for line in said.get("lessons") or []:
+                state.lessons.append(str(line))
+                state.say(f"  {line}")
+            state.not_established.extend(str(x) for x in said.get("not_established") or [])
+            if said.get("conclusion") and getattr(state, "records", None) is not None:
+                state.records.conclude(dict(said["conclusion"]))
+            cands = [Candidate(name=str(c["name"]), artifact=str(c.get("artifact", "")), knobs=dict(c.get("knobs") or {}),
+                               meta={"strategy": str(c.get("by") or "command"), **({"idea": str(c["why"])} if c.get("why") else {})})
+                     for c in said.get("candidates") or [] if isinstance(c, dict) and c.get("name")]
+            state.say(f"  command search, round {rounds}: {len(cands)} candidate(s)"
+                      + (f" -- {said['say']}" if said.get("say") else ""))
+            if not cands:
+                if hasattr(state, "search_done"):
+                    state.search_done = True
+                return
+            if said.get("done") and hasattr(state, "search_done"):
+                state.search_done = True
+            yield cands
+            if said.get("done"):
+                return
+
+
+def _last_json(text: str) -> dict[str, Any] | None:
+    """The last line of `text` that is a JSON object (a command may print other lines first)."""
+    import json
+
+    for line in reversed(text.strip().splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                got = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(got, dict):
+                return got
+    try:
+        got = json.loads(text)
+        return got if isinstance(got, dict) else None
+    except ValueError:
+        return None
+
+
 def _factory(cls):
     def make(config: dict[str, Any]):
         return cls(**_config(cls, config))
@@ -847,6 +984,6 @@ def _factory(cls):
     return make
 
 
-for _cls in (Sweep, MonteCarlo, Anneal, Gradient, Genetic, ModelSearch, Pareto, Control, Phases):
+for _cls in (Sweep, MonteCarlo, Anneal, Gradient, Genetic, ModelSearch, Pareto, Control, Phases, CommandSearch):
     _POLICIES[_cls.name] = _cls
     register("orchestrator", _cls.name, _factory(_cls))

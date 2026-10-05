@@ -192,6 +192,8 @@ class LoopRequest:
     critique_rounds: int = 1        # times a critic may send a passing part back; 0 = no critic
     calibrate: bool = True          # the calibrate node between stages; `flow: {calibrate: off}` turns it off
     workers: int = 0                # tool runs at once (a stage's candidates, a sweep's points); 0 = the box decides
+    batch: int = 1                  # D738: the search's designs one pass carries (made and measured side by side)
+    parallel: int = 1               # D747: passes run at once, each its own design and branch (an admin allows it on a server)
     parallel_parts: int = 1         # parts drafted at once on worker threads; admission, the record's row
                                     # and the state stay on the loop's thread (D569)
     ahead: bool = True              # measure an admitted part alone on a worker while the model writes the
@@ -353,6 +355,8 @@ class LoopResult:
     #: whether a model could draft something new; an at-rest pass with nothing explorable waits
     #: for a stop or a note (D593)
     explorable: bool = True
+    #: D802: each sub-loop's own result, by name (a parent of sub-loops that composes no whole)
+    children: dict[str, Any] = field(default_factory=dict)
 
     @property
     def cut_short(self) -> bool:

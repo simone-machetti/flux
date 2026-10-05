@@ -83,6 +83,13 @@
             ps.z3-solver
             ps.numpy
             chipPkgs.zigzag-dse
+            # `flux serve`, the web interface (D683): the API, its server, form uploads,
+            # and httpx for FastAPI's test client
+            ps.fastapi
+            ps.uvicorn
+            ps.python-multipart
+            ps.httpx
+            ps.cryptography       # users' model keys, encrypted at rest (Fernet)
           ];
           pythonEnv = pkgs.python3.withPackages basePythonPackages;
 
@@ -99,6 +106,7 @@
             "evaluator/timeloop/src"
             "core/stores/src"
             "interfaces/cli/src"
+            "interfaces/web/src"
             "evaluator/calibration/src"
             "evaluator/rtl/src"
             "mentor/knowledge/src"
@@ -114,7 +122,6 @@
             "applications/bankmap/lib/src"
             "applications/macarray/lib/src"
             "applications/interconnect_mapping/lib/src"
-            "applications/nlu/lib/src"
             "evaluator/openroad/src"
             "generator/harness_spec/src"
             "generator/harness_rtl/src"
@@ -179,11 +186,13 @@
               pythonEnv pkgs.docker-client
               pkgs.ruff        # the lint CI runs: `ruff check` (pyflakes rules; honours noqa)
               chipPkgs.verilator chipPkgs.sv-lang chipPkgs.yosys
+              chipPkgs.iverilog  # Icarus Verilog: event-driven simulation beside Verilator
               # CMU-SAFARI/Pythia: ChampSim, with its source tree under
               # $out/share/pythia so `flux champsim build` can rebuild it.
               chipPkgs.pythia
               pkgs.systemc     # a SystemC prototype's testbench links it (D635)
               pkgs.hyperfine   # `flux prog time` (D661)
+              pkgs.tini        # PID 1 of the run's sandbox: reaps the tools' processes, forwards signals (D680)
             ]
             # Physical design (OpenROAD, yosys-slang), linux-only.
             ++ pkgs.lib.optionals pkgs.stdenv.isLinux [

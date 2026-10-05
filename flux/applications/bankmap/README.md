@@ -6,20 +6,27 @@ say precisely what is achievable when that is impossible.
 
 ```bash
 cd flux
-nix develop --command flux task run applications/bankmap/bankmap.problem.yaml --steps 2   # solver only, no model, seconds
-nix develop --command flux task run applications/bankmap/bankmap.problem.yaml --tui       # plus model rounds
+nix develop --command flux task run applications/bankmap --tui       # baseline, proof, z3, then model rounds
 ```
 
+The study is the document and the commands of `flux_bankmap.steps`, one per phase (D799) -- no
+world. The chain below is `orchestrate: {command: "... steps search {history} {state} {params}"}`:
+the loop calls it once a round with what was measured and refused so far, and it prints the next
+candidates (each a mapping's Verilog with a `// flux_bankmap:` line saying the mapping and the
+wiring), lessons, and -- when nothing conflict-free exists -- the best partial answer as the run's
+conclusion. The gate is `steps check` (the exhaustive checker), the one stage `steps cost` (the
+XOR count). A model round asks the run's own model (`FLUX_REMOTE_*`, a local Ollama), told the
+solver's outcome, the counter-examples, what was refused and what the operator typed.
+
 The record and the chosen mapping's Verilog go to `applications/bankmap/out/` (`bankmap.db`,
-`bankmap.v`) unless `--db` / `--out` say otherwise. `--steps 2` stops after the baseline and
-the solver's step; the document's 4 adds two model rounds, which report themselves skipped
-when no model is reachable.
+`bankmap.v`) unless `--db` / `--out` say otherwise. `params.model_rounds: 0` stops after the
+solver; a round with no model reachable ends the chain where the solver did.
 
 ## Changing the ask
 
 The request is the document's `params:`; there are no per-application flags. Copy
-`bankmap.problem.yaml`, edit `params:`, give the copy its own `id:`, and run
-the copy:
+the folder (its name is the copy's id, so its record is its own), edit `params:` in its
+`problem.yaml`, and run the copy:
 
 ```yaml
 params:
@@ -30,6 +37,7 @@ params:
   z3_seconds: 60            # solver budget per attempt
   max_xor_inputs: null      # hardware bound: address bits folded into one bank bit
   llm_round: 6              # mappings a model may propose per round; 0 = solver only
+  model_rounds: 2           # model rounds after the solver
 ```
 
 (That example is the impossible request below.) The interconnect keys -- `topology`,
@@ -143,6 +151,6 @@ stage-aware two-XOR fold in 3.4 s that the bank-only search's answer would have 
 
 `lib/src/flux_bankmap/`: `problem` (request/result), `mapping` (Modulo, XorFold, Expr — each
 with cost, description and Verilog), `check` (the exhaustive checker), `impossible` (the
-pigeonhole proof), `solve_z3` (CEGIS over folds), `propose` (the model's DSL and prompt), `topology` (the networks as stages), `world` (the hooks the loop calls). It runs
-as a document: `flux task run`; with `--json FILE` the answer's `result` carries the mapping's
-Verilog.
+pigeonhole proof), `solve_z3` (CEGIS over folds), `propose` (the model's DSL and prompt), `topology` (the networks as stages), `steps` (the document's commands: the search, the check,
+the cost). It runs as a document: `flux task run`; the decided mapping's Verilog is the run's
+artifact (`out/bankmap.v`).

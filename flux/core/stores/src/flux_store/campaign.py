@@ -291,24 +291,23 @@ class CampaignStore:
     ) -> int:
         """The intent record, committed before evaluation starts so a crash shows as an
         interrupted trial. Returns the trial seq."""
+        # D747: the next seq taken in the insert itself -- one statement holds the write lock, so
+        # passes at once on their own connections never take the same one (a row was lost)
         row = self._conn.execute(
-            "SELECT COALESCE(MAX(seq), 0) + 1 FROM trials WHERE campaign_id = ?", (campaign_id,)
-        ).fetchone()
-        seq = int(row[0])
-        self._conn.execute(
             "INSERT INTO trials (campaign_id, seq, phase, stage, candidate_json, "
             "candidate_key, workload_hash, arch_hash, status, strategy_kind, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)",
+            "VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM trials WHERE campaign_id = ?), "
+            "?, ?, ?, ?, ?, ?, 'running', ?, ?) RETURNING seq",
             (
                 # default=str: a non-JSON object in the candidate is recorded as text rather
                 # than failing the whole trial write.
-                campaign_id, seq, phase, stage,
+                campaign_id, campaign_id, phase, stage,
                 json.dumps(candidate, default=str), candidate_key,
                 workload_hash, arch_hash, strategy_kind, _now(),
             ),
-        )
+        ).fetchone()
         self._conn.commit()
-        return seq
+        return int(row[0])
 
     def complete_trial(
         self,
@@ -373,22 +372,23 @@ class CampaignStore:
         if status is not None:
             clauses.append("status = ?")
             params.append(status)
+        # D774: each trial's result in the same query -- not one query per trial (a day's record
+        # of 40k trials took 126k queries)
         rows = self._conn.execute(
-            "SELECT seq, phase, stage, candidate_json, candidate_key, workload_hash, "
-            "arch_hash, status, result_id, error, cache_hit, wall_clock_s, created_at "
-            f"FROM trials WHERE {' AND '.join(clauses)} ORDER BY seq",
+            "SELECT t.seq, t.phase, t.stage, t.candidate_json, t.candidate_key, t.workload_hash, "
+            "t.arch_hash, t.status, t.result_id, t.error, t.cache_hit, t.wall_clock_s, t.created_at, r.result_json "
+            f"FROM trials t LEFT JOIN results r ON r.id = t.result_id WHERE {' AND '.join('t.' + c for c in clauses)} "
+            "ORDER BY t.seq",
             params,
         ).fetchall()
         out: list[Trial] = []
         for r in rows:
             result = None
-            if r[8] is not None:
+            if r[8] is not None and r[13] is not None:
                 # Any status with a stored result gets it back, not just "ok": a
                 # constraint_violated trial is still a real measurement (D264). `ok_trials`
                 # still filters by status for ranking.
-                stored = self.results.get_result(r[8])
-                if stored is not None:
-                    result = Result.from_dict(stored["result"])
+                result = Result.from_dict(json.loads(r[13]))
             out.append(Trial(
                 seq=r[0], phase=r[1], stage=r[2],
                 candidate=json.loads(r[3]), candidate_key=r[4], workload_hash=r[5],

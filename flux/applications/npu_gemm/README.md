@@ -9,7 +9,7 @@ No model is needed.
 
 | file | what it is |
 |---|---|
-| `npu_gemm.problem.yaml` | the document: the space (PE array width, global buffer size), the gate, the stage, the objectives |
+| `problem.yaml` | the document: the space (PE array width, global buffer size), the gate, the stage, the objectives |
 | `workload.yaml` | what runs on the accelerator, as Workload IR |
 | `render.py` | writes one architecture from `pe_x` and `gbuf_kb` |
 | `check.py` | the gate: the architecture is valid Architecture IR |
@@ -18,7 +18,7 @@ No model is needed.
 ## Run it
 
 ```bash
-nix develop --command flux task run applications/npu_gemm/npu_gemm.problem.yaml --passes 1
+nix develop --command flux task run applications/npu_gemm --passes 1
 ```
 
 About 30 seconds for the 15 points. The front, on this workload:
@@ -38,9 +38,9 @@ changing ZigZag's numbers here.
 
 - **Another workload:** replace `workload.yaml` (see `core/ir/workload/examples/` and
   [docs/ir.md](../../../docs/ir.md)).
-- **More of the architecture:** add knobs to `space:` and to `render.py` (a 2-D array, another
+- **More of the architecture:** add knobs to `flow.orchestrate.space` and to `render.py` (a 2-D array, another
   memory level).
-- **A bigger space:** `flow: {dse: gradient}` or a list of phases, or `llm` to let a model
+- **A bigger space:** `flow: {orchestrate: gradient}` or a list of phases, or `llm` to let a model
   propose points ([docs/cookbook.md](../../../docs/cookbook.md)).
 - **Another cost model:** `make_evaluator("timeloop")` in `measure.py` (it needs Docker, or
   `nix develop .#timeloop`).

@@ -192,14 +192,14 @@ def test_the_model_stays_the_default_and_can_be_named(tmp_path):
 
 # ------------------------------------------------------------------ the document
 def _doc(**kw):
-    doc = {"id": "drafted", "statement": "produce the word good", 
-           "parts": [{"name": "piece", "statement": "the word"}],
-           "gate": {"test": ["grep", "-q", "good", "{artifact}"]},
-           "stages": [{"name": "size", "command": ["wc", "-c", "{artifact}"],
-                      "metrics_re": {"bytes": r"(\d+)"}}],
-           "objectives": [{"metric": "bytes", "direction": "minimize"}]}
+    doc = {"id": "drafted",
+           "statement": "produce the word good",
+           "parts": {"piece": "the word"},
+           "objectives": [{"metric": "bytes", "direction": "minimize"}],
+           "flow": {"test": {"test": ["grep", "-q", "good", "{artifact}"]},
+                    "measure": {"size": {"command": ["wc", "-c", "{artifact}"], "metrics_re": {"bytes": '(\\d+)'}}}}}
     if "generator" in kw:                          # who drafts is the flow's `generate` box (D629)
-        doc["flow"] = {"generate": kw.pop("generator")}
+        doc["flow"] = {**doc.get("flow", {}), "generate": kw.pop("generator")}
     doc.update(kw)
     return doc
 
@@ -253,10 +253,22 @@ def test_a_generator_the_document_cannot_mean_is_a_load_error():
     assert TaskSpec.from_dict(_doc(generator="model")).generator == {}, "the default, said out loud"
 
 
-def test_a_sub_task_inherits_who_drafts():
+def test_a_parents_generate_composes_and_is_not_the_sub_tasks_drafter():
+    """D801: with sub-tasks, the parent's `generate` composes their answers; a child drafts its own."""
     parent = _doc(generator={"command": ["true"]})
     parent.pop("parts")
     parent["subtasks"] = [{"id": "child", "statement": "the child's own artifact"}]
     task = TaskSpec.from_dict(parent)
-    assert task.subtasks[0].generator == {"command": ["true"]}
+    assert task.subtasks[0].generator == {} and task.generator == {"command": ["true"]}
+    # D804: a model or an agent there drafts for the sub-tasks: they inherit it
+    agent = _doc(generator={"by": "claude"})
+    agent.pop("parts")
+    agent["subtasks"] = [{"id": "child", "statement": "the child's own artifact"}]
+    drafted = TaskSpec.from_dict(agent)
+    assert drafted.subtasks[0].generator == {"agent": "claude"}
+    from flux_cli.commands import _drafted_by                # and `flux task check` says so
+
+    assert _drafted_by(drafted) == "its sub-loops, each by the coding agent `claude` unless its folder says otherwise"
+    assert _drafted_by(drafted.subtasks[0]) == "the coding agent `claude`"
+    assert _drafted_by(task) == "its sub-loops, composed by the generator command"
     assert json.loads(json.dumps(task.to_dict()))["flow"]["generate"] == {"command": ["true"]}

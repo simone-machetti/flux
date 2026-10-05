@@ -47,11 +47,20 @@ def register(campaign_id: str, workdir: str, *, argv: list[str] | None = None, d
     d = run_dir(campaign_id)
     os.makedirs(d, exist_ok=True)
     mine = _read(os.path.join(d, "run.json")) or {}
-    if mine.get("pid") != os.getpid():
+    if mine.get("pid") != os.getpid() or mine.get("container") != (os.environ.get("FLUX_SANDBOX_NAME") or None):
         mine = {}                          # every pass registers; the same process keeps its count and start
+        # (in a sandbox every run's flux has the same pid: the container tells two runs apart, D688)
+        # D695: a stop asked of an earlier run is not this one's -- a run stopped at once never
+        # reached the pass boundary that clears it, and the next start would obey it
+        try:
+            os.remove(os.path.join(d, "stop"))
+        except OSError:
+            pass
     doc = {"pid": os.getpid(), "argv": list(argv if argv is not None else sys.argv), "cwd": os.getcwd(),
            "started": mine.get("started") or time.time(), "workdir": workdir,
            "log": os.environ.get("FLUX_RUN_LOG") or None,
+           "container": os.environ.get("FLUX_SANDBOX_NAME") or None,   # D680: its pid is the container's
+           "container_cli": json.loads(os.environ.get("FLUX_SANDBOX_CLI") or "null"),   # D682: how to reach it
            "passes": int(mine.get("passes") or 0), "last_pass_ended": mine.get("last_pass_ended"),
            "campaign": campaign_id}
     _write(os.path.join(d, "run.json"), doc)
@@ -149,8 +158,32 @@ def status(campaign_id: str, db: str | None = None) -> dict[str, Any]:
     if not doc:
         return out
     out.update(doc)
-    out["state"] = "running" if alive(doc.get("pid")) else "stale"
+    out["state"] = "running" if _running(doc) else "stale"
     return out
+
+
+def _outside(doc: dict[str, Any]) -> bool:
+    """The run is in a sandbox this process is not in (D680): its pid means nothing here."""
+    return bool(doc.get("container")) and os.environ.get("FLUX_SANDBOX_NAME") != doc.get("container")
+
+
+def _cli(doc: dict[str, Any]) -> list[str]:
+    """The engine command the run was started with (Podman with its storage, or Docker)."""
+    cli = doc.get("container_cli")
+    return [str(c) for c in cli] if isinstance(cli, list) and cli else ["docker"]
+
+
+def _running(doc: dict[str, Any]) -> bool:
+    if not _outside(doc):
+        return alive(doc.get("pid"))
+    import subprocess
+
+    try:
+        r = subprocess.run([*_cli(doc), "inspect", "-f", "{{.State.Running}}", str(doc["container"])],
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.stdout.strip() == "true"
 
 
 def interrupt(campaign_id: str, db: str | None = None) -> bool:
@@ -159,6 +192,12 @@ def interrupt(campaign_id: str, db: str | None = None) -> bool:
     st = status(campaign_id, db)
     if st["state"] != "running":
         return False
+    if _outside(st):
+        import subprocess
+
+        # to the container's init, which hands it to flux
+        return subprocess.run([*_cli(st), "kill", "--signal", "INT", str(st["container"])],
+                              capture_output=True).returncode == 0
     os.kill(int(st["pid"]), signal.SIGINT)
     return True
 
@@ -172,8 +211,11 @@ def _read(p: str) -> dict[str, Any] | None:
 
 
 def _write(p: str, doc: dict[str, Any]) -> None:
-    # a per-process temporary, so concurrent registrations do not race; the replace is atomic
-    tmp = f"{p}.{os.getpid()}.tmp"
+    # a per-process and per-thread temporary (D747: passes at once), so concurrent registrations
+    # do not race; the replace is atomic
+    import threading
+
+    tmp = f"{p}.{os.getpid()}.{threading.get_ident()}.tmp"
     with open(tmp, "w") as f:
         json.dump(doc, f, indent=1)
     os.replace(tmp, p)

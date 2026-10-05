@@ -14,7 +14,7 @@ from flux_loop import PromptProblem, TaskError, TaskSpec, request_for, run_loop
 from flux_loop.agent import DECIDE, agent_spec, missing_agent, question_in
 from flux_loop.document import describe_flow
 
-DIGITS = Path(__file__).resolve().parents[2] / "core" / "loop" / "examples" / "digits.task.json"
+DIGITS = Path(__file__).resolve().parents[2] / "core" / "loop" / "examples" / "digits" / "problem.json"
 
 FAKE_AGENT = '''
 import sys, re
@@ -42,8 +42,8 @@ elif mode == "fail":
 def _doc(tmp_path: Path, mode: str) -> dict:
     fake = tmp_path / "agent.py"
     fake.write_text(FAKE_AGENT)
-    doc = json.loads(DIGITS.read_text())
-    doc["flow"] = {"generate": {"agent": {"command": ["{python}", str(fake), mode, "{prompt_file}", "{artifact}"], "timeout_s": 60}}}
+    doc = {"id": "digits", **json.loads(DIGITS.read_text())}
+    doc["flow"] = {**doc.get("flow", {}), "generate": {"by": {"command": ["{python}", str(fake), mode, "{prompt_file}", "{artifact}"], "timeout_s": 60}}}
     doc["budget"] = {"steps": 2, "repair_attempts": 2, "prototype": False}
     return doc
 
@@ -64,8 +64,9 @@ def test_the_agent_writes_the_artifact_and_is_repaired_from_the_failure(tmp_path
     assert "HOW TO ANSWER" in last and "Write the complete text artifact" in last
     assert "THE LAST DRAFT" in last and "FAIL line 4" in last, "the repair brief carries the prior and the failure"
     first = seen.split("=====")[0]
-    assert "THE GATE that will judge the file is this command" in first and "digits" in first, \
-        "D595: the agent is told the gate's own command, so it can run it on its draft"
+    assert "raw tools: they are denied" in first and "comes back to you" in first and "THE GATE" not in first, \
+        "D673: the agent writes, the loop runs the gate and comes back with its output"
+    assert "flux probe gate FILE" in first, "D678: and it may check its file through the loop's own gate"
 
 
 def test_the_agent_may_print_the_artifact_instead(tmp_path):
@@ -89,17 +90,19 @@ def test_the_presets_and_the_missing_binary():
     assert agent_spec("opencode").resume[-2:] == ("--session", "{session}") and agent_spec("opencode").output == "opencode"
     assert "--dir" in agent_spec("opencode").argv and "{workdir}" in agent_spec("opencode").argv
     assert "AskUserQuestion" in agent_spec("claude").argv and "--resume" in agent_spec("claude").resume
+    for argv in (agent_spec("claude").argv, agent_spec("claude").resume):    # D673: a shell without the design tools
+        assert argv[argv.index("--allowedTools") + 1] == "Bash" and "Bash(yosys:*)" in argv and "Bash(bash:*)" in argv
     a = agent_spec({"preset": "codex", "timeout_s": 60, "questions": "model"})
     assert a.tool == "codex" and a.timeout_s == 60.0 and a.questions == "model" and a.resume is None
-    with pytest.raises(ValueError, match="not a preset"):
+    with pytest.raises(ValueError, match="not an agent here"):
         agent_spec("cursor")
     with pytest.raises(ValueError, match="questions is one of decide, model, operator"):
         agent_spec({"preset": "opencode", "questions": "ask-me"})
     with pytest.raises(ValueError, match="quetions is not one of"):
         agent_spec({"preset": "opencode", "quetions": "model"})
-    with pytest.raises(TaskError, match="flow.generate.agent"):
-        TaskSpec.from_dict({**json.loads(DIGITS.read_text()), "flow": {"generate": {"agent": "cursor"}}})
-    doc = {**json.loads(DIGITS.read_text()), "flow": {"generate": {"agent": "claude"}}}
+    with pytest.raises(TaskError, match="flow.generate.by"):
+        TaskSpec.from_dict({**{"id": "digits", **json.loads(DIGITS.read_text())}, "flow": {**{"id": "digits", **json.loads(DIGITS.read_text())}.get("flow", {}), "generate": {"by": "cursor"}}})
+    doc = {**{"id": "digits", **json.loads(DIGITS.read_text())}, "flow": {**{"id": "digits", **json.loads(DIGITS.read_text())}.get("flow", {}), "generate": {"by": "claude"}}}
     task = TaskSpec.from_dict(doc)
     assert task.generator == {"agent": "claude"}
     missing = PromptProblem(task).tools_missing()
@@ -144,8 +147,8 @@ else:
 def _asking(tmp_path: Path, mode: str, questions: str, **extra) -> dict:
     fake = tmp_path / "ask.py"
     fake.write_text(ASKING_AGENT)
-    doc = json.loads(DIGITS.read_text())
-    doc["flow"] = {"generate": {"agent": {"command": ["{python}", str(fake), mode, "{prompt_file}", "{artifact}"],
+    doc = {"id": "digits", **json.loads(DIGITS.read_text())}
+    doc["flow"] = {**doc.get("flow", {}), "generate": {"by": {"command": ["{python}", str(fake), mode, "{prompt_file}", "{artifact}"],
                                                 "timeout_s": 60, "questions": questions, **extra}}}
     doc["budget"] = {"steps": 1, "repair_attempts": 1, "prototype": False}
     return doc
@@ -216,8 +219,8 @@ def test_an_agent_that_keeps_asking_is_refused_after_max_questions(tmp_path):
 def test_the_answer_resumes_the_agents_own_session(tmp_path):
     fake = tmp_path / "resume.py"
     fake.write_text(RESUMING_AGENT)
-    doc = json.loads(DIGITS.read_text())
-    doc["flow"] = {"generate": {"agent": {"command": ["{python}", str(fake), "first", "{artifact}"],
+    doc = {"id": "digits", **json.loads(DIGITS.read_text())}
+    doc["flow"] = {**doc.get("flow", {}), "generate": {"by": {"command": ["{python}", str(fake), "first", "{artifact}"],
                                                 "resume": ["{python}", str(fake), "resume", "{session}", "{answer}", "{artifact}"],
                                                 "output": "opencode", "timeout_s": 60}}}
     doc["budget"] = {"steps": 1, "repair_attempts": 1, "prototype": False}
@@ -274,3 +277,19 @@ def test_an_agent_that_ran_out_of_context_continues_in_a_fresh_session(tmp_path)
     subs = {"prompt": "write out.txt", "artifact": str(art), "python": sys.executable, "workdir": str(tmp_path)}
     converse(spec, subs, workdir=tmp_path, artifact=art, answer=lambda q: ("", "nobody"), say=said.append)
     assert art.read_text() == "done\n" and any("ran out of context; a fresh session" in m for m in said)
+
+
+def test_opencode_is_denied_the_design_tools_in_its_inline_config():
+    """D673: the shell allowed, the deny list merged into OPENCODE_CONFIG_CONTENT, the machine's
+    own keys kept."""
+    from flux_loop.agent import DENIED, _config_env
+
+    spec = agent_spec("opencode")
+    env = _config_env(spec, {"OPENCODE_CONFIG_CONTENT": '{"permission": {"edit": "allow"}, "model": "m"}'})
+    cfg = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+    assert cfg["model"] == "m" and cfg["permission"]["edit"] == "allow"
+    assert cfg["permission"]["external_directory"] == "allow", "D710: `opencode run` cannot ask for a path outside its folder"
+    bash = cfg["permission"]["bash"]
+    assert list(bash)[0] == "*" and bash["*"] == "allow"            # first: a later, narrower rule wins
+    assert bash["yosys"] == bash["yosys *"] == bash["flux rtl *"] == "deny" and len(bash) == 1 + 2 * len(DENIED)
+    assert _config_env(agent_spec("claude"), {}) == {}
